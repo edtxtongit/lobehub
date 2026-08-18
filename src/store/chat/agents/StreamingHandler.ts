@@ -72,6 +72,13 @@ export class StreamingHandler {
 
   // ========== Throttled updates ==========
   private throttledUpdateToolCalls: ReturnType<typeof throttle>;
+  /**
+   * PERF: text was the highest-frequency chunk type (tens per second, bursting
+   * far higher) yet the ONLY one dispatched without throttling. Every call
+   * rebuilt the whole conversation tree twice. Coalescing to ~60ms keeps
+   * streaming visually continuous while cutting store writes dramatically.
+   */
+  private throttledContentUpdate: ReturnType<typeof throttle>;
 
   constructor(
     private context: StreamingContext,
@@ -84,6 +91,14 @@ export class StreamingHandler {
         this.callbacks.onToolCallsUpdate(tools);
       },
       300,
+      { leading: true, trailing: true },
+    );
+
+    this.throttledContentUpdate = throttle(
+      () => {
+        this.callbacks.onContentUpdate(this.output, this.buildReasoningState());
+      },
+      60,
       { leading: true, trailing: true },
     );
   }
@@ -232,8 +247,8 @@ export class StreamingHandler {
       this.context.operationId,
     );
 
-    // Notify update
-    this.callbacks.onContentUpdate(this.output, this.buildReasoningState());
+    // Notify update (throttled — flushed in handleFinish)
+    this.throttledContentUpdate();
   }
 
   private handleReasoningChunk(chunk: { text: string; type: 'reasoning' }): void {
@@ -474,6 +489,8 @@ export class StreamingHandler {
     if (!toolCalls?.length) return;
 
     this.throttledUpdateToolCalls.flush();
+    // Ensure the final token batch reaches the UI before the turn settles.
+    this.throttledContentUpdate.flush();
     this.callbacks.toggleToolCallingStreaming(this.context.messageId, undefined);
 
     const processedToolCalls = toolCalls.map((item) => ({

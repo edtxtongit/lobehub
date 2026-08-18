@@ -124,6 +124,16 @@ export const virtuaListSlice: StateCreator<State & VirtuaListAction, [], [], Vir
   },
 
   setScrollState: (state) => {
+    // PERF: zustand's `set` always allocates a new state object and notifies
+    // EVERY subscriber. The scroll handler calls this twice per scroll event
+    // (and the streaming auto-scroll fires it continuously), so writing an
+    // unchanged value used to re-run every selector in the conversation tree.
+    const current = get();
+    const atBottomSame = state.atBottom === undefined || state.atBottom === current.atBottom;
+    const isScrollingSame =
+      state.isScrolling === undefined || state.isScrolling === current.isScrolling;
+    if (atBottomSame && isScrollingSame) return;
+
     set(state);
   },
 

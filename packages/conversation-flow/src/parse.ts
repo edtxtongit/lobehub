@@ -4,6 +4,22 @@ import { Transformer } from './transformation';
 import type { Message, MessageGroupMetadata, ParseResult } from './types';
 
 /**
+ * Memoizes the flatList display-shape transform (supervisor role + usage
+ * promotion) keyed by the source message object.
+ *
+ * Why this exists: `parse()` is called on every streaming token. The transform
+ * below clones a message whenever it has `metadata.usage` but no top-level
+ * `usage` — which is true for every assistant turn that has finished. Without
+ * memoization the clone is data-identical but reference-different on each call,
+ * so `parse()` is not idempotent and all downstream referential-equality
+ * bailouts (React.memo, zustand's Object.is, replaceEqualDeep) break down.
+ *
+ * A WeakMap keyed on the source object keeps this leak-free: entries disappear
+ * as soon as the underlying message is garbage collected.
+ */
+const displayShapeCache = new WeakMap<Message, Message>();
+
+/**
  * Main parse function - the brain of the conversation flow engine
  *
  * Converts a flat array of messages into:
@@ -122,6 +138,15 @@ export function parse(messages: Message[], messageGroups?: MessageGroupMetadata[
   // For non-grouped supervisor messages (e.g., supervisor summary without tools)
   // Note: sub_agent scope transformation is done in pre-processing phase (before buildHelperMaps)
   const processedFlatList = flatList.map((msg) => {
+    // PERF: this map used to clone a message on EVERY parse() call, and parse()
+    // runs on every streaming token. Cloning made parse() non-idempotent — two
+    // parses of the identical input returned different object identities — which
+    // defeated every `memo` / `Object.is` bailout downstream and forced the whole
+    // visible message list (markdown + highlighting) to re-render per token.
+    // Memoizing per source object makes the transform referentially idempotent.
+    const memoized = displayShapeCache.get(msg);
+    if (memoized) return memoized;
+
     let next = msg;
 
     // Transform supervisor messages
@@ -140,9 +165,11 @@ export function parse(messages: Message[], messageGroups?: MessageGroupMetadata[
       next = { ...next, usage: next.metadata.usage };
     }
 
+    // Only cache when a clone actually happened; identity results need no entry.
+    if (next !== msg) displayShapeCache.set(msg, next);
+
     return next;
   });
-
   // Historical data can contain a taskCallback and a tool result as
   // sibling branches under the same assistant tool-use shell. Normal branch
   // resolution must keep choosing one conversational continuation, but hiding

@@ -1,4 +1,4 @@
-import { parse } from '@lobechat/conversation-flow';
+import { detectContentOnlyDelta, parse, patchContentInFlatList } from '@lobechat/conversation-flow';
 import { type ConversationContext, type TraceEventPayloads } from '@lobechat/types';
 import debug from 'debug';
 import isEqual from 'fast-deep-equal';
@@ -64,12 +64,27 @@ export class MessageInternalsActionImpl {
     // reconcileAssistantToolLinks).
     const reconciled = reconcileAssistantToolLinks(updatedRawMessages);
 
+    // PERF: this used to be `isEqual(nextDbMap, dbMessagesMap)` — a deep compare
+    // of EVERY loaded topic's full message list, executed on every streaming
+    // token, that could never return true while content was growing.
+    // Both `messagesReducer` (immer `produce`) and `reconcileAssistantToolLinks`
+    // are documented to return the SAME array reference when nothing changed,
+    // so a reference check is equivalent and O(1).
+    if (reconciled === rawMessages) return;
+
     const nextDbMap = { ...this.#get().dbMessagesMap, [messagesKey]: reconciled };
 
-    if (isEqual(nextDbMap, this.#get().dbMessagesMap)) return;
+    // PERF: streaming tokens only ever change one message's content/reasoning —
+    // never the conversation shape. Detect that case by reference diff and patch
+    // the already-parsed flatList in place instead of rebuilding the whole tree
+    // (buildHelperMaps -> buildIdTree -> transformAll -> flatten) per token.
+    // Falls back to a full parse whenever anything structural moved.
+    const delta = detectContentOnlyDelta(rawMessages, reconciled);
+    const patched = delta
+      ? patchContentInFlatList(this.#get().messagesMap[messagesKey], delta)
+      : undefined;
 
-    // parse to get display messages
-    const { flatList } = parse(reconciled);
+    const flatList = patched ?? parse(reconciled).flatList;
     const nextDisplayMap = { ...this.#get().messagesMap, [messagesKey]: flatList };
 
     this.#set({ dbMessagesMap: nextDbMap, messagesMap: nextDisplayMap }, false, {

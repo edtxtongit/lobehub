@@ -1,5 +1,7 @@
 // Main parse function
 export { parse } from './parse';
+export type { ContentOnlyDelta } from './incremental';
+export { detectContentOnlyDelta, patchContentInFlatList } from './incremental';
 
 // Assistant group authored-content semantics
 export type {

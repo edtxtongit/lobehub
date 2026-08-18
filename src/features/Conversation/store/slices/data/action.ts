@@ -1,4 +1,4 @@
-import { parse } from '@lobechat/conversation-flow';
+import { detectContentOnlyDelta, parse, patchContentInFlatList } from '@lobechat/conversation-flow';
 import { type ConversationContext, type UIChatMessage } from '@lobechat/types';
 import debug from 'debug';
 import { type SWRResponse } from 'swr';
@@ -165,11 +165,17 @@ export const dataSlice: StateCreator<
       return;
     }
 
-    // Re-parse for display order and grouping
-    const { flatList } = parse(newDbMessages);
+    // PERF: content-only streaming deltas patch the parsed list in place; only
+    // structural changes pay for a full rebuild. See incremental.ts.
+    const contentDelta = detectContentOnlyDelta(dbMessages, newDbMessages);
+    const patchedFlatList = contentDelta
+      ? patchContentInFlatList(get().displayMessages, contentDelta)
+      : undefined;
+
     // parse() rebuilds every message/block/tool reference, so pin unchanged
     // subtrees back to their previous identity to preserve memo bailouts.
-    const stableFlatList = stabilizeReferences(get().displayMessages, flatList);
+    const stableFlatList =
+      patchedFlatList ?? stabilizeReferences(get().displayMessages, parse(newDbMessages).flatList);
 
     log(
       '[dispatchMessage] updated | contextKey=%s | prevCount=%d | newCount=%d | displayCount=%d',
@@ -205,9 +211,19 @@ export const dataSlice: StateCreator<
 
     const prevDbMessages = get().dbMessages;
 
-    // Parse messages using conversation-flow
-    const { flatList } = parse(messages);
-    const stableFlatList = stabilizeReferences(get().displayMessages, flatList);
+    // PERF: this is the hot path for streaming. StoreUpdater pushes raw rows from
+    // ChatStore on every token, so we cannot see the dispatch payload here —
+    // recover the intent with a reference diff. When only one message's
+    // content/reasoning moved, patch the parsed flatList in place: that skips
+    // both the full tree rebuild AND the whole-tree replaceEqualDeep walk, and
+    // keeps every untouched node's identity so memo bailouts survive.
+    const contentDelta = detectContentOnlyDelta(prevDbMessages, messages);
+    const patchedFlatList = contentDelta
+      ? patchContentInFlatList(get().displayMessages, contentDelta)
+      : undefined;
+
+    const stableFlatList =
+      patchedFlatList ?? stabilizeReferences(get().displayMessages, parse(messages).flatList);
 
     log(
       '[replaceMessages] | contextKey=%s | prevCount=%d | newCount=%d | displayCount=%d | skipOnMessagesChange=%s | messageIds=%o',

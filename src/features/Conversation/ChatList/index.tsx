@@ -3,6 +3,7 @@
 import { Flexbox } from '@lobehub/ui';
 import type { ReactNode } from 'react';
 import { memo, useCallback, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 
 import AsyncError from '@/components/AsyncError';
 import { useFetchTopicMemories } from '@/hooks/useFetchMemoryForTopic';
@@ -127,7 +128,14 @@ const ChatList = memo<ChatListProps>(
       mutate: messagesSWR.mutate,
     });
     const displayMessages = useConversationStore(dataSelectors.displayMessages);
-    const displayMessageIds = useConversationStore(dataSelectors.displayMessageIds);
+    // PERF: `displayMessageIds` maps over displayMessages and therefore returns a
+    // NEW array on every call. Subscribing without a shallow comparator made
+    // this component re-render on every store notification of any field
+    // (isScrolling, atBottom, activeIndex included), dragging VirtualizedList
+    // and the whole visible row set with it.
+    const displayMessageIds = useConversationStore(
+      useShallow(dataSelectors.displayMessageIds),
+    );
     const overlayHeight = useConversationStore(inputSelectors.chatInputOverlayHeight);
     const latestMessageId = displayMessageIds.at(-1);
 
