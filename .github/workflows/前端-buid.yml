@@ -2,7 +2,7 @@ name: Streaming Frontend Verification
 
 on:
   push:
-    branches: [arena/01a0193e-lobehub]
+    branches: [arena/01a01aac-lobehub]
   workflow_dispatch:
 
 permissions:
