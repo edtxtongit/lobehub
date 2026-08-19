@@ -29,6 +29,13 @@ import { useAgentSignalReceipts } from './hooks/useAgentSignalReceipts';
 import { useMessageRefreshError } from './hooks/useMessageRefreshError';
 import { resolveMessageListFeedback } from './resolveMessageListFeedback';
 
+const EMPTY_AGENT_SIGNAL_RECEIPT_ANCHOR_INDEX = {
+  assistantReplyByTrigger: new Map<string, string>(),
+  displayedIds: new Set<string>(),
+  groupIdByChildId: new Map<string, string>(),
+};
+const selectEmptyAgentSignalReceiptAnchorIndex = () => EMPTY_AGENT_SIGNAL_RECEIPT_ANCHOR_INDEX;
+
 const MessageAuthorConfigLoader = memo<{ agentId: string; isLogin: boolean | undefined }>(
   ({ agentId, isLogin }) => {
     const useFetchAgentConfig = useAgentStore((s) => s.useFetchAgentConfig);
@@ -117,6 +124,9 @@ const ChatList = memo<ChatListProps>(
       (s) => !!context.topicId && s.creatingTopicIds.includes(context.topicId),
     );
     const { enableAgentSelfIteration } = useServerConfigStore(featureFlagsSelectors);
+    // Skip receipt topology work entirely on the common disabled/share path.
+    const isSharePage = !!context.topicShareId;
+    const canShowAgentSignalReceipts = enableAgentSelfIteration === true && !isSharePage;
     const messagesSWR = useFetchMessages(context, {
       revalidateOnFocus: !isStreaming,
       skipFetch: skipFetch || isCreatingTopic,
@@ -127,25 +137,28 @@ const ChatList = memo<ChatListProps>(
       isValidating: messagesSWR.isValidating,
       mutate: messagesSWR.mutate,
     });
-    const displayMessages = useConversationStore(dataSelectors.displayMessages);
-    // PERF: `displayMessageIds` maps over displayMessages and therefore returns a
-    // NEW array on every call. Subscribing without a shallow comparator made
-    // this component re-render on every store notification of any field
-    // (isScrolling, atBottom, activeIndex included), dragging VirtualizedList
-    // and the whole visible row set with it.
+    // PERF: these projections depend on message topology, not content. Shallow/
+    // structural equality keeps ChatList outside the per-token render path;
+    // individual MessageItem subscriptions update only the streamed row.
     const displayMessageIds = useConversationStore(
       useShallow(dataSelectors.displayMessageIds),
+    );
+    const allMessageAuthorAgentIds = useConversationStore(
+      useShallow(dataSelectors.displayMessageAgentIds),
+    );
+    const receiptAnchorIndex = useConversationStore(
+      canShowAgentSignalReceipts
+        ? dataSelectors.agentSignalReceiptAnchorIndex
+        : selectEmptyAgentSignalReceiptAnchorIndex,
+      dataSelectors.agentSignalReceiptAnchorIndexEqual,
     );
     const overlayHeight = useConversationStore(inputSelectors.chatInputOverlayHeight);
     const latestMessageId = displayMessageIds.at(-1);
 
-    // Skip fetching notebook and memories for share pages (they require authentication)
-    const isSharePage = !!context.topicShareId;
     // TODO: Migrate Agent Signal receipts behind a dedicated user-visible receipt capability.
-    const canShowAgentSignalReceipts = enableAgentSelfIteration === true && !isSharePage;
     const { receiptsByAnchor } = useAgentSignalReceipts({
       agentId: canShowAgentSignalReceipts ? activeAgentId : undefined,
-      displayMessages,
+      anchorIndex: receiptAnchorIndex,
       enabled: canShowAgentSignalReceipts,
       pollingSignal: latestMessageId,
       topicId: canShowAgentSignalReceipts ? context.topicId : undefined,
@@ -162,11 +175,8 @@ const ChatList = memo<ChatListProps>(
     const useFetchAgentConfig = useAgentStore((s) => s.useFetchAgentConfig);
     useFetchAgentConfig(isLogin, context.agentId);
     const messageAuthorAgentIds = useMemo(
-      () =>
-        [...new Set(displayMessages.map((message) => message.agentId).filter(Boolean))].filter(
-          (agentId) => agentId !== context.agentId,
-        ) as string[],
-      [context.agentId, displayMessages],
+      () => allMessageAuthorAgentIds.filter((agentId) => agentId !== context.agentId),
+      [allMessageAuthorAgentIds, context.agentId],
     );
 
     // Fetch conversation context data when a conversation is visible (skip for share pages).

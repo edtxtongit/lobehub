@@ -1,11 +1,13 @@
 import type {
   AssistantContentBlock,
   ChatToolPayloadWithResult,
+  StepContextTodos,
   UIChatMessage,
 } from '@lobechat/types';
 
 import { useChatStore } from '@/store/chat';
 import { topicSelectors } from '@/store/chat/selectors';
+import { selectCurrentTurnTodosFromMessages } from '@/store/chat/slices/message/selectors/dbMessage';
 
 import { type State } from '../../initialState';
 import { getPendingInterventions } from './pendingInterventions';
@@ -31,7 +33,120 @@ const displayMessageIds = (s: State): string[] => {
   }
   return ids;
 };
+
+const displayMessageAgentIdsCache = new WeakMap<UIChatMessage[], string[]>();
+
+/**
+ * Unique top-level message authors in first-seen order. ChatList only needs
+ * these ids to mount metadata loaders; message content must not make the whole
+ * list subscribe to displayMessages.
+ */
+const displayMessageAgentIds = (s: State): string[] => {
+  let agentIds = displayMessageAgentIdsCache.get(s.displayMessages);
+  if (agentIds) return agentIds;
+
+  const seen = new Set<string>();
+  agentIds = [];
+  for (const message of s.displayMessages) {
+    if (!message.agentId || seen.has(message.agentId)) continue;
+    seen.add(message.agentId);
+    agentIds.push(message.agentId);
+  }
+  displayMessageAgentIdsCache.set(s.displayMessages, agentIds);
+  return agentIds;
+};
+
+export interface AgentSignalReceiptAnchorIndex {
+  assistantReplyByTrigger: Map<string, string>;
+  displayedIds: Set<string>;
+  groupIdByChildId: Map<string, string>;
+}
+
+const agentSignalReceiptAnchorIndexCache = new WeakMap<
+  UIChatMessage[],
+  AgentSignalReceiptAnchorIndex
+>();
+
+/**
+ * Agent Signal receipt placement depends only on message topology, not content.
+ * Project that topology once so content streaming can update one row without
+ * invalidating ChatList's render boundary.
+ */
+const agentSignalReceiptAnchorIndex = (s: State): AgentSignalReceiptAnchorIndex => {
+  let index = agentSignalReceiptAnchorIndexCache.get(s.displayMessages);
+  if (index) return index;
+
+  const assistantReplyByTrigger = new Map<string, string>();
+  const displayedIds = new Set<string>();
+  const groupIdByChildId = new Map<string, string>();
+
+  for (const message of s.displayMessages) {
+    displayedIds.add(message.id);
+
+    if (
+      (message.role === 'assistant' || message.role === 'assistantGroup') &&
+      message.parentId !== null &&
+      message.parentId !== undefined &&
+      !assistantReplyByTrigger.has(message.parentId)
+    ) {
+      // Preserve Array.find semantics: the first displayed reply wins.
+      assistantReplyByTrigger.set(message.parentId, message.id);
+    }
+
+    if (message.role !== 'assistantGroup') continue;
+    for (const block of message.children ?? []) {
+      // Preserve the first assistantGroup returned by the previous find/some walk.
+      if (!groupIdByChildId.has(block.id)) groupIdByChildId.set(block.id, message.id);
+    }
+  }
+
+  index = { assistantReplyByTrigger, displayedIds, groupIdByChildId };
+  agentSignalReceiptAnchorIndexCache.set(s.displayMessages, index);
+  return index;
+};
+
+const stringMapEqual = (left: Map<string, string>, right: Map<string, string>): boolean => {
+  if (left === right) return true;
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    if (right.get(key) !== value) return false;
+  }
+  return true;
+};
+
+const agentSignalReceiptAnchorIndexEqual = (
+  left: AgentSignalReceiptAnchorIndex,
+  right: AgentSignalReceiptAnchorIndex,
+): boolean => {
+  if (left === right) return true;
+  if (left.displayedIds.size !== right.displayedIds.size) return false;
+  for (const id of left.displayedIds) {
+    if (!right.displayedIds.has(id)) return false;
+  }
+  return (
+    stringMapEqual(left.assistantReplyByTrigger, right.assistantReplyByTrigger) &&
+    stringMapEqual(left.groupIdByChildId, right.groupIdByChildId)
+  );
+};
+
 const dbMessages = (s: State) => s.dbMessages;
+
+const currentTurnTodosCache = new WeakMap<
+  UIChatMessage[],
+  { value: StepContextTodos | undefined }
+>();
+
+/** Shared by ChatInput's panel layout and TodoProgress's renderer. */
+const currentTurnTodos = (s: State): StepContextTodos | undefined => {
+  let cached = currentTurnTodosCache.get(s.dbMessages);
+  if (cached) return cached.value;
+
+  cached = { value: selectCurrentTurnTodosFromMessages(s.dbMessages) };
+  currentTurnTodosCache.set(s.dbMessages, cached);
+  return cached.value;
+};
+
+const hasCurrentTurnTodos = (s: State): boolean => (currentTurnTodos(s)?.items.length ?? 0) > 0;
 const messagesInit = (s: State) => s.messagesInit;
 const skipFetch = (s: State) => s.skipFetch;
 
@@ -421,8 +536,12 @@ const getVerifyOrdinal = (id: string) => (s: State) => {
 };
 
 export const dataSelectors = {
+  agentSignalReceiptAnchorIndex,
+  agentSignalReceiptAnchorIndexEqual,
   currentTopicSummary,
+  currentTurnTodos,
   dbMessages,
+  displayMessageAgentIds,
   getVerifyOrdinal,
   displayMessageIds,
   displayMessages,
@@ -436,6 +555,7 @@ export const dataSelectors = {
   getToolInBlock,
   getToolMessageCreatedAt,
   getToolsInBlock,
+  hasCurrentTurnTodos,
   hasNoRenderedReply,
   isSecondLastMessageFromUser,
   messagesInit,

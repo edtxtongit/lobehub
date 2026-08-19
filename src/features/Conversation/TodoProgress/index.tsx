@@ -5,10 +5,9 @@ import { Flexbox, Icon, Tag } from '@lobehub/ui';
 import { Checkbox } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { ChevronDown, ChevronUp, CircleArrowRight } from 'lucide-react';
-import { memo, useMemo, useState } from 'react';
+import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { selectCurrentTurnTodosFromMessages } from '@/store/chat/slices/message/selectors/dbMessage';
 import { shinyTextStyles } from '@/styles';
 
 import { dataSelectors, messageStateSelectors, useConversationStore } from '../store';
@@ -128,17 +127,10 @@ const TodoProgress = memo<TodoProgressProps>(({ className, topAttached }) => {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
 
-  // Get messages and AI generating state from conversation store
-  const dbMessages = useConversationStore(dataSelectors.dbMessages);
+  // This selector shares one cached current-turn scan with ChatInput's layout
+  // gate, so a streamed content update does not traverse the topic twice.
+  const todos: StepContextTodos | undefined = useConversationStore(dataSelectors.currentTurnTodos);
   const isAIGenerating = useConversationStore(messageStateSelectors.isAIGenerating);
-
-  // Extract todos produced within the current agent turn (after the last user
-  // message). Older turns' todos intentionally drop out so a new operation
-  // doesn't keep a stale completed progress bar on screen.
-  const todos: StepContextTodos | undefined = useMemo(
-    () => selectCurrentTurnTodosFromMessages(dbMessages),
-    [dbMessages],
-  );
 
   // Calculate progress
   const items = todos?.items || [];

@@ -4,11 +4,14 @@ import { memo, useCallback } from 'react';
 
 import PromptTransformAction from '@/features/PromptTransform/PromptTransformAction';
 
-import { useChatInputStore } from '../../store';
+import { useChatInputStore, useStoreApi } from '../../store';
 import { ChatInputAction } from '../components/ChatInputAction';
 
 const PromptTransform = memo(() => {
-  const [editor, markdownContent] = useChatInputStore((s) => [s.editor, s.markdownContent]);
+  const editor = useChatInputStore((s) => s.editor);
+  const hasPrompt = useChatInputStore((s) => Boolean(s.markdownContent.trim()));
+  const storeApi = useStoreApi();
+  const getPrompt = useCallback(() => storeApi.getState().markdownContent, [storeApi]);
 
   const onPromptChange = useCallback(
     (prompt: string) => {
@@ -23,8 +26,9 @@ const PromptTransform = memo(() => {
   return (
     <PromptTransformAction
       ActionComponent={ChatInputAction}
+      getPrompt={getPrompt}
+      hasPrompt={hasPrompt}
       mode={'image'}
-      prompt={markdownContent}
       onPromptChange={onPromptChange}
     />
   );

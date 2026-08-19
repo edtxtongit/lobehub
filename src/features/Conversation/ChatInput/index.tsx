@@ -6,7 +6,7 @@ import { type ChatInputActionsProps } from '@lobehub/editor/react';
 import { Flexbox, type MenuProps } from '@lobehub/ui';
 import { Alert } from '@lobehub/ui/base-ui';
 import { type ReactNode } from 'react';
-import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -15,6 +15,7 @@ import {
 } from '@/business/client/hooks/useBusinessChatInputSendAreaPrefix';
 import type { ActionKeys, ChatInputFeature } from '@/features/ChatInput';
 import { ChatInputProvider, DesktopChatInput } from '@/features/ChatInput';
+import { useStoreApi as useChatInputStoreApi } from '@/features/ChatInput/store';
 import {
   type SendButtonHandler,
   type SendButtonProps,
@@ -23,7 +24,6 @@ import { useAgentStore } from '@/store/agent';
 import { chatConfigByIdSelectors } from '@/store/agent/selectors';
 import { useChatStore } from '@/store/chat';
 import { operationSelectors } from '@/store/chat/selectors';
-import { selectCurrentTurnTodosFromMessages } from '@/store/chat/slices/message/selectors/dbMessage';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 import { fileChatSelectors, useFileStore } from '@/store/file';
 
@@ -53,6 +53,54 @@ import { canSendVoiceMessage, useCanSendVoiceMessage } from './voiceMessageCapab
 
 /** Max recent messages to feed into auto-complete context (≈10 conversation turns) */
 const MAX_CONTEXT_MESSAGES = 25;
+
+type ContextWindowMessages = ReturnType<typeof getContextWindowMessages>;
+
+const contextWindowMessagesEqual = (
+  left: { content: string }[] | undefined,
+  right: ContextWindowMessages,
+): boolean => {
+  if (left === right) return true;
+  if (!left || left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i]?.content !== right[i]?.content) return false;
+  }
+  return true;
+};
+
+/**
+ * Isolate the content-sensitive token/context projection from the composer UI.
+ * Streaming updates this tiny bridge and the ChatInput store, while the editor,
+ * action bar, dropdowns, and surrounding layout keep their React identities.
+ */
+const ChatInputMessageContextSync = memo<{
+  enableHistoryCount?: boolean;
+  historyCount?: number;
+}>(({ enableHistoryCount, historyCount }) => {
+  const dbMessages = useConversationStore(dataSelectors.dbMessages);
+  const chatInputStoreApi = useChatInputStoreApi();
+  const contextWindowMessages = useMemo(
+    () => getContextWindowMessages(dbMessages, { enableHistoryCount, historyCount }),
+    [dbMessages, enableHistoryCount, historyCount],
+  );
+
+  // The token badge reads this store value; publish before paint without
+  // forcing the parent composer tree through the same content update.
+  useLayoutEffect(() => {
+    if (
+      contextWindowMessagesEqual(
+        chatInputStoreApi.getState().contextWindowMessages,
+        contextWindowMessages,
+      )
+    )
+      return;
+    chatInputStoreApi.setState({ contextWindowMessages });
+  }, [chatInputStoreApi, contextWindowMessages]);
+
+  return null;
+});
+
+ChatInputMessageContextSync.displayName = 'ConversationChatInputMessageContextSync';
 
 export interface ChatInputProps {
   /**
@@ -186,7 +234,6 @@ const ChatInput = memo<ChatInputProps>(
 
     // ConversationStore state
     const storeApi = useConversationStoreApi();
-    const dbMessages = useConversationStore(dataSelectors.dbMessages);
     const context = useConversationStore((s) => s.context);
     const contextKey = useMemo(() => messageMapKey(context), [context]);
     const canRecordVoiceMessage = useCanSendVoiceMessage(context);
@@ -200,18 +247,15 @@ const ChatInput = memo<ChatInputProps>(
       chatConfigByIdSelectors.getEnableHistoryCountById(agentId || '')(s),
       chatConfigByIdSelectors.getHistoryCountById(agentId || '')(s),
     ]);
-    const chatInputMessages = useMemo(() => toChatInputMessages(dbMessages), [dbMessages]);
-    const contextWindowMessages = useMemo(
-      () =>
-        getContextWindowMessages(dbMessages, {
-          enableHistoryCount,
-          historyCount,
-        }),
-      [dbMessages, enableHistoryCount, historyCount],
-    );
+    // Auto-complete asks for context only when invoked. Read the live immutable
+    // snapshot then, instead of making the entire composer subscribe to every
+    // streamed content write just to keep a callback closure fresh.
     const getMessages = useCallback(
-      () => chatInputMessages.slice(-MAX_CONTEXT_MESSAGES),
-      [chatInputMessages],
+      () =>
+        toChatInputMessages(dataSelectors.dbMessages(storeApi.getState())).slice(
+          -MAX_CONTEXT_MESSAGES,
+        ),
+      [storeApi],
     );
     const updateInputMessage = useConversationStore((s) => s.updateInputMessage);
     const setEditor = useConversationStore((s) => s.setEditor);
@@ -270,7 +314,7 @@ const ChatInput = memo<ChatInputProps>(
 
     // Detect whether TodoProgress will render (mirrors its own gating) so we
     // can square the top corners of OpStatusTray when it sits flush below.
-    const hasTodos = (selectCurrentTurnTodosFromMessages(dbMessages)?.items.length ?? 0) > 0;
+    const hasTodos = useConversationStore(dataSelectors.hasCurrentTurnTodos);
 
     // Detect whether OpStatusTray will render (mirrors its own `!startTime`
     // gate) so GoalTray — which sits flush below it — can square its top corners
@@ -499,7 +543,6 @@ const ChatInput = memo<ChatInputProps>(
         allowExpand={allowExpand}
         canRecordVoiceMessage={canRecordVoiceMessage}
         contextSelectionKey={contextKey}
-        contextWindowMessages={contextWindowMessages}
         draftKey={contextKey}
         feature={feature}
         getMessages={getMessages}
@@ -520,6 +563,10 @@ const ChatInput = memo<ChatInputProps>(
         onSend={handleSend}
         onVoiceMessageSend={handleVoiceMessageSend}
       >
+        <ChatInputMessageContextSync
+          enableHistoryCount={enableHistoryCount}
+          historyCount={historyCount}
+        />
         {children ?? defaultContent}
       </ChatInputProvider>
     );

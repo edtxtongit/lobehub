@@ -7,6 +7,8 @@ import { systemAgentSelectors } from '@/store/user/selectors';
 import { merge } from '@/utils/merge';
 
 interface UsePromptTransformParams {
+  getPrompt?: () => string | null | undefined;
+  hasPrompt?: boolean;
   mode: 'image' | 'video' | 'text';
   onPromptChange: (prompt: string) => void;
   prompt?: string | null;
@@ -14,7 +16,13 @@ interface UsePromptTransformParams {
 
 type PromptTransformAction = 'rewrite' | 'translate';
 
-export const usePromptTransform = ({ mode, prompt, onPromptChange }: UsePromptTransformParams) => {
+export const usePromptTransform = ({
+  getPrompt,
+  hasPrompt,
+  mode,
+  prompt,
+  onPromptChange,
+}: UsePromptTransformParams) => {
   const [isTransforming, setIsTransforming] = useState(false);
   const [transformAction, setTransformAction] = useState<PromptTransformAction>('rewrite');
 
@@ -34,7 +42,8 @@ export const usePromptTransform = ({ mode, prompt, onPromptChange }: UsePromptTr
 
   const runTransform = useCallback(
     async (action: PromptTransformAction) => {
-      if (isTransforming || !prompt?.trim()) return;
+      const currentPrompt = getPrompt?.() ?? prompt;
+      if (isTransforming || !currentPrompt?.trim()) return;
       if (action === 'rewrite' && !isRewriteActionEnabled) return;
 
       let transformedPrompt = '';
@@ -58,9 +67,9 @@ export const usePromptTransform = ({ mode, prompt, onPromptChange }: UsePromptTr
             action === 'rewrite'
               ? chainRewriteGenerationPrompt({
                   mode,
-                  prompt,
+                  prompt: currentPrompt,
                 })
-              : chainTranslate(prompt, 'English'),
+              : chainTranslate(currentPrompt, 'English'),
           ),
         });
       } finally {
@@ -68,7 +77,15 @@ export const usePromptTransform = ({ mode, prompt, onPromptChange }: UsePromptTr
         setTransformAction('rewrite');
       }
     },
-    [getConfigByAction, isRewriteActionEnabled, isTransforming, mode, onPromptChange, prompt],
+    [
+      getConfigByAction,
+      getPrompt,
+      isRewriteActionEnabled,
+      isTransforming,
+      mode,
+      onPromptChange,
+      prompt,
+    ],
   );
 
   const rewritePrompt = useCallback(async () => {
@@ -81,7 +98,7 @@ export const usePromptTransform = ({ mode, prompt, onPromptChange }: UsePromptTr
 
   return {
     isRewriteEnabled: isRewriteActionEnabled,
-    isTransformDisabled: !prompt?.trim(),
+    isTransformDisabled: !(hasPrompt ?? Boolean(prompt?.trim())),
     isTransforming,
     rewritePrompt,
     transformAction,

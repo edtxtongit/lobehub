@@ -1,9 +1,10 @@
-import type { UIChatMessage } from '@lobechat/types';
 import { useMemo, useRef } from 'react';
 import useSWR from 'swr';
 
 import { agentSignalKeys } from '@/libs/swr/keys';
 import { agentSignalService } from '@/services/agentSignal';
+
+import type { AgentSignalReceiptAnchorIndex } from '../../store/slices/data/selectors';
 
 /** Poll cadence for the active conversation's Agent Signal receipt surface. */
 const AGENT_SIGNAL_RECEIPT_INITIAL_REFRESH_INTERVAL_MS = 3000;
@@ -46,7 +47,7 @@ const receiptGroupsEqual = (
 
 export const useAgentSignalReceipts = (input: {
   agentId?: string | null;
-  displayMessages: UIChatMessage[];
+  anchorIndex: AgentSignalReceiptAnchorIndex;
   enabled?: boolean;
   pollingSignal?: string | null;
   topicId?: string | null;
@@ -136,7 +137,7 @@ export const useAgentSignalReceipts = (input: {
     }
 
     const next = groupAgentSignalReceiptsByEffectiveAnchor({
-      displayMessages: input.displayMessages,
+      anchorIndex: input.anchorIndex,
       receipts,
     });
     const previous = previousReceiptsByAnchorRef.current;
@@ -144,7 +145,7 @@ export const useAgentSignalReceipts = (input: {
 
     previousReceiptsByAnchorRef.current = next;
     return next;
-  }, [input.displayMessages, receipts, shouldFetch]);
+  }, [input.anchorIndex, receipts, shouldFetch]);
 
   return {
     isLoading,
@@ -153,49 +154,21 @@ export const useAgentSignalReceipts = (input: {
 };
 
 interface GroupAgentSignalReceiptsByEffectiveAnchorInput {
-  displayMessages: UIChatMessage[];
+  anchorIndex: AgentSignalReceiptAnchorIndex;
   receipts: AgentSignalReceiptView[];
 }
 
-const resolveAssistantReplyFromTrigger = (
-  triggerMessageId: string | undefined,
-  displayMessages: UIChatMessage[],
-) => {
-  if (!triggerMessageId) return undefined;
-
-  return displayMessages.find(
-    (message) =>
-      (message.role === 'assistant' || message.role === 'assistantGroup') &&
-      message.parentId === triggerMessageId,
-  )?.id;
-};
-
-const resolveDisplayedAnchorMessageId = (
-  anchorMessageId: string,
-  displayMessages: UIChatMessage[],
-) => {
-  if (displayMessages.some((message) => message.id === anchorMessageId)) return anchorMessageId;
-
-  return displayMessages.find(
-    (message) =>
-      message.role === 'assistantGroup' &&
-      message.children?.some((block) => block.id === anchorMessageId),
-  )?.id;
-};
-
 const resolveEffectiveAnchorMessageId = (
   receipt: AgentSignalReceiptView,
-  displayMessages: UIChatMessage[],
+  anchorIndex: AgentSignalReceiptAnchorIndex,
 ) => {
   if (receipt.anchorMessageId) {
-    return resolveDisplayedAnchorMessageId(receipt.anchorMessageId, displayMessages);
+    if (anchorIndex.displayedIds.has(receipt.anchorMessageId)) return receipt.anchorMessageId;
+    return anchorIndex.groupIdByChildId.get(receipt.anchorMessageId);
   }
   if (!receipt.triggerMessageId) return undefined;
 
-  const assistantReplyId = resolveAssistantReplyFromTrigger(
-    receipt.triggerMessageId,
-    displayMessages,
-  );
+  const assistantReplyId = anchorIndex.assistantReplyByTrigger.get(receipt.triggerMessageId);
   if (assistantReplyId) return assistantReplyId;
 
   // Display fallback belongs here, not in the persisted receipt. A trigger-only
@@ -206,13 +179,13 @@ const resolveEffectiveAnchorMessageId = (
 };
 
 const groupAgentSignalReceiptsByEffectiveAnchor = ({
-  displayMessages,
+  anchorIndex,
   receipts,
 }: GroupAgentSignalReceiptsByEffectiveAnchorInput) => {
   const receiptsByAnchor = new Map<string, AgentSignalReceiptView[]>();
 
   for (const receipt of receipts) {
-    const anchorMessageId = resolveEffectiveAnchorMessageId(receipt, displayMessages);
+    const anchorMessageId = resolveEffectiveAnchorMessageId(receipt, anchorIndex);
     if (!anchorMessageId) continue;
 
     receiptsByAnchor.set(anchorMessageId, [

@@ -430,6 +430,76 @@ describe('dataSelectors', () => {
       expect(dataSelectors.getDbMessageById('tool-new')(store)).toBe(second);
     });
 
+    it('keeps author and receipt topology projections content-independent', () => {
+      const first = createMockState({
+        displayMessages: [
+          msg('user-1', { agentId: 'agent-a', content: 'short', role: 'user' }),
+          msg('assistant-1', {
+            agentId: 'agent-b',
+            content: 'short',
+            parentId: 'user-1',
+          }),
+        ],
+      });
+      const streamed = createMockState({
+        displayMessages: [
+          msg('user-1', { agentId: 'agent-a', content: 'short', role: 'user' }),
+          msg('assistant-1', {
+            agentId: 'agent-b',
+            content: 'a much longer streamed reply',
+            parentId: 'user-1',
+          }),
+        ],
+      });
+
+      expect(dataSelectors.displayMessageAgentIds(first)).toEqual(['agent-a', 'agent-b']);
+      expect(
+        dataSelectors.agentSignalReceiptAnchorIndexEqual(
+          dataSelectors.agentSignalReceiptAnchorIndex(first),
+          dataSelectors.agentSignalReceiptAnchorIndex(streamed),
+        ),
+      ).toBe(true);
+      expect(
+        dataSelectors.agentSignalReceiptAnchorIndex(first).assistantReplyByTrigger.get('user-1'),
+      ).toBe('assistant-1');
+    });
+
+    it('detects receipt topology changes while preserving first-match anchors', () => {
+      const first = createMockState({
+        displayMessages: [
+          msg('group-first', {
+            children: [{ id: 'child-1' }],
+            parentId: 'user-1',
+            role: 'assistantGroup',
+          }),
+          msg('group-second', {
+            children: [{ id: 'child-1' }],
+            parentId: 'user-1',
+            role: 'assistantGroup',
+          }),
+        ],
+      });
+      const changed = createMockState({
+        displayMessages: [
+          msg('group-first', {
+            children: [{ id: 'child-2' }],
+            parentId: 'user-1',
+            role: 'assistantGroup',
+          }),
+        ],
+      });
+      const firstIndex = dataSelectors.agentSignalReceiptAnchorIndex(first);
+
+      expect(firstIndex.assistantReplyByTrigger.get('user-1')).toBe('group-first');
+      expect(firstIndex.groupIdByChildId.get('child-1')).toBe('group-first');
+      expect(
+        dataSelectors.agentSignalReceiptAnchorIndexEqual(
+          firstIndex,
+          dataSelectors.agentSignalReceiptAnchorIndex(changed),
+        ),
+      ).toBe(false);
+    });
+
     it('reuses derived intervention and task-callback lists for one snapshot', () => {
       const store = createMockState({
         displayMessages: [

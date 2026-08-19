@@ -12,13 +12,15 @@ import { usePromptTransform } from './usePromptTransform';
 
 interface PromptTransformActionProps {
   ActionComponent?: ComponentType<ActionProps>;
+  getPrompt?: () => string | null | undefined;
+  hasPrompt?: boolean;
   mode: 'image' | 'video' | 'text';
   onPromptChange: (prompt: string) => void;
   prompt?: string | null;
 }
 
 const PromptTransformAction = memo<PromptTransformActionProps>(
-  ({ ActionComponent = Action, mode, onPromptChange, prompt }) => {
+  ({ ActionComponent = Action, getPrompt, hasPrompt, mode, onPromptChange, prompt }) => {
     const { t } = useTranslation('common');
 
     const {
@@ -29,6 +31,8 @@ const PromptTransformAction = memo<PromptTransformActionProps>(
       rewritePrompt,
       translatePrompt,
     } = usePromptTransform({
+      getPrompt,
+      hasPrompt,
       mode,
       onPromptChange,
       prompt,

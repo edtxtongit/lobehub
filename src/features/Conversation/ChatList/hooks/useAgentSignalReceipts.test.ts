@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { agentSignalService } from '@/services/agentSignal';
 
+import { dataSelectors, type State } from '../../store';
 import { useAgentSignalReceipts } from './useAgentSignalReceipts';
 
 const { receipt } = vi.hoisted(() => ({
@@ -52,8 +53,21 @@ describe('useAgentSignalReceipts', () => {
     vi.useRealTimers();
   });
 
-  const renderReceiptsHook = (input: Parameters<typeof useAgentSignalReceipts>[0]) =>
-    renderHook(() => useAgentSignalReceipts(input), { wrapper });
+  type ReceiptHookTestInput = Omit<
+    Parameters<typeof useAgentSignalReceipts>[0],
+    'anchorIndex'
+  > & { displayMessages: UIChatMessage[] };
+
+  const toAnchorIndex = (displayMessages: UIChatMessage[]) =>
+    dataSelectors.agentSignalReceiptAnchorIndex({ displayMessages } as unknown as State);
+
+  const renderReceiptsHook = (input: ReceiptHookTestInput) => {
+    const { displayMessages, ...rest } = input;
+    return renderHook(
+      () => useAgentSignalReceipts({ ...rest, anchorIndex: toAnchorIndex(displayMessages) }),
+      { wrapper },
+    );
+  };
 
   it('groups anchored receipts by anchorMessageId', async () => {
     const { result } = renderReceiptsHook({
@@ -236,7 +250,7 @@ describe('useAgentSignalReceipts', () => {
       ({ displayMessages }) =>
         useAgentSignalReceipts({
           agentId: 'agent-1',
-          displayMessages,
+          anchorIndex: toAnchorIndex(displayMessages),
           enabled: false,
           topicId: 'topic-1',
         }),
@@ -258,7 +272,7 @@ describe('useAgentSignalReceipts', () => {
       ({ displayMessages }) =>
         useAgentSignalReceipts({
           agentId: 'agent-1',
-          displayMessages,
+          anchorIndex: toAnchorIndex(displayMessages),
           enabled: true,
           topicId: 'topic-1',
         }),
@@ -285,7 +299,7 @@ describe('useAgentSignalReceipts', () => {
       ({ displayMessages }) =>
         useAgentSignalReceipts({
           agentId: 'agent-1',
-          displayMessages,
+          anchorIndex: toAnchorIndex(displayMessages),
           enabled: true,
           topicId: 'topic-1',
         }),
@@ -427,7 +441,7 @@ describe('useAgentSignalReceipts', () => {
       ({ pollingSignal }) =>
         useAgentSignalReceipts({
           agentId: 'agent-1',
-          displayMessages: [],
+          anchorIndex: toAnchorIndex([]),
           enabled: true,
           pollingSignal,
           topicId: 'topic-1',
