@@ -43,6 +43,14 @@ const isCallbackSignal = (sig: MessageSignal | undefined): boolean =>
 const isTaskCompletionSignal = (sig: MessageSignal | undefined): boolean =>
   sig?.type === 'task-completion';
 
+interface FlatMessageIndexes {
+  childrenByParentId: Map<string, Message[]>;
+  groupMembersByGroupId: Map<string, Message[]>;
+  orderByMessage: WeakMap<Message, number>;
+  toolMessageByParentAndCallId: Map<string, Map<string, Message>>;
+  toolMessagesById: Map<string, Message>;
+}
+
 /**
  * MessageCollector - Handles collection of related messages
  *
@@ -53,17 +61,85 @@ const isTaskCompletionSignal = (sig: MessageSignal | undefined): boolean =>
  * 4. Finding next messages in sequences
  */
 export class MessageCollector {
+  /**
+   * A parse snapshot is immutable. Cache its relationship indexes by array
+   * identity so all assistant/tool groups in the same transform share one O(n)
+   * indexing pass instead of repeatedly filtering the full topic.
+   */
+  private readonly flatMessageIndexCache = new WeakMap<Message[], FlatMessageIndexes>();
+  private readonly messageMapValues: Message[];
+
   constructor(
     private messageMap: Map<string, Message>,
     private childrenMap: Map<string | null, string[]>,
     private branchResolver: BranchResolver = new BranchResolver(messageMap),
-  ) {}
+  ) {
+    this.messageMapValues = [...messageMap.values()];
+  }
+
+  private getFlatMessageIndexes(messages: Message[]): FlatMessageIndexes {
+    let indexes = this.flatMessageIndexCache.get(messages);
+    if (indexes) return indexes;
+
+    const childrenByParentId = new Map<string, Message[]>();
+    const groupMembersByGroupId = new Map<string, Message[]>();
+    const orderByMessage = new WeakMap<Message, number>();
+    const toolMessageByParentAndCallId = new Map<string, Map<string, Message>>();
+    const toolMessagesById = new Map<string, Message>();
+
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index];
+      if (!message) continue;
+      orderByMessage.set(message, index);
+
+      if (message.parentId !== null && message.parentId !== undefined) {
+        const children = childrenByParentId.get(message.parentId);
+        if (children) children.push(message);
+        else childrenByParentId.set(message.parentId, [message]);
+      }
+
+      if (message.groupId !== null && message.groupId !== undefined) {
+        const members = groupMembersByGroupId.get(message.groupId);
+        if (members) members.push(message);
+        else groupMembersByGroupId.set(message.groupId, [message]);
+      }
+
+      if (message.role !== 'tool') continue;
+      // Matches the old Map(messages.map(...)) behavior for duplicate ids.
+      toolMessagesById.set(message.id, message);
+      if (
+        message.parentId === null ||
+        message.parentId === undefined ||
+        message.tool_call_id === null ||
+        message.tool_call_id === undefined
+      )
+        continue;
+
+      let byCallId = toolMessageByParentAndCallId.get(message.parentId);
+      if (!byCallId) {
+        byCallId = new Map();
+        toolMessageByParentAndCallId.set(message.parentId, byCallId);
+      }
+      // The fallback used Array.find, so the first matching row wins.
+      if (!byCallId.has(message.tool_call_id)) byCallId.set(message.tool_call_id, message);
+    }
+
+    indexes = {
+      childrenByParentId,
+      groupMembersByGroupId,
+      orderByMessage,
+      toolMessageByParentAndCallId,
+      toolMessagesById,
+    };
+    this.flatMessageIndexCache.set(messages, indexes);
+    return indexes;
+  }
 
   /**
    * Collect all messages belonging to a message group
    */
   collectGroupMembers(groupId: string, messages: Message[]): Message[] {
-    return messages.filter((m) => m.groupId === groupId);
+    return [...(this.getFlatMessageIndexes(messages).groupMembersByGroupId.get(groupId) ?? [])];
   }
 
   /**
@@ -73,9 +149,9 @@ export class MessageCollector {
     const tools = assistant.tools || [];
     if (tools.length === 0) return [];
 
-    const toolMessagesById = new Map(
-      messages.filter((m) => m.role === 'tool').map((m) => [m.id, m]),
-    );
+    const { toolMessageByParentAndCallId, toolMessagesById } =
+      this.getFlatMessageIndexes(messages);
+    const fallbackByCallId = toolMessageByParentAndCallId.get(assistant.id);
     const collected: Message[] = [];
     const collectedIds = new Set<string>();
 
@@ -93,9 +169,7 @@ export class MessageCollector {
         continue;
       }
 
-      const fallbackToolMessage = messages.find(
-        (m) => m.role === 'tool' && m.parentId === assistant.id && m.tool_call_id === tool.id,
-      );
+      const fallbackToolMessage = fallbackByCallId?.get(tool.id);
 
       if (fallbackToolMessage && !collectedIds.has(fallbackToolMessage.id)) {
         collected.push(fallbackToolMessage);
@@ -135,7 +209,7 @@ export class MessageCollector {
     if (parent?.role !== 'user') return false;
 
     const groupAgentId = assistant.agentId;
-    const allMessages = [...this.messageMap.values()];
+    const allMessages = this.messageMapValues;
     const visited = new Set<string>([assistant.id]);
     let current: Message = assistant;
 
@@ -260,11 +334,12 @@ export class MessageCollector {
     processedIds: Set<string>,
     groupAgentId: string | undefined,
   ): Message | undefined {
+    const { childrenByParentId, orderByMessage } = this.getFlatMessageIndexes(allMessages);
     const candidateParentIds = new Set<string>();
     let hasFanOutTool = false;
     for (const toolMsg of toolMessages) {
       const isCouncil = (toolMsg.metadata as any)?.agentCouncil === true;
-      const toolChildren = allMessages.filter((m) => m.parentId === toolMsg.id);
+      const toolChildren = childrenByParentId.get(toolMsg.id) ?? [];
       const hasTaskChild = toolChildren.some((m) => m.role === 'task');
       if (isCouncil || hasTaskChild) {
         hasFanOutTool = true;
@@ -275,11 +350,24 @@ export class MessageCollector {
     // Assistant-anchored continuation only counts when this step did not fan out.
     if (!hasFanOutTool) candidateParentIds.add(currentAssistant.id);
 
-    const candidates = allMessages
-      .filter((m) => m.parentId != null && candidateParentIds.has(m.parentId))
-      .filter((m) => m.role !== 'tool' && !processedIds.has(m.id))
-      .filter((m) => m.role === 'assistant' && m.agentId === groupAgentId && !getMessageSignal(m))
-      .sort((a, b) => a.createdAt - b.createdAt);
+    const candidates: Message[] = [];
+    for (const parentId of candidateParentIds) {
+      for (const message of childrenByParentId.get(parentId) ?? []) {
+        if (message.role !== 'assistant') continue;
+        if (processedIds.has(message.id)) continue;
+        if (message.agentId !== groupAgentId || getMessageSignal(message)) continue;
+        candidates.push(message);
+      }
+    }
+    // The old allMessages.filter(...).sort(...) used input order to break equal
+    // timestamps (stable Array.sort). Keep that exact tie-break after gathering
+    // candidates from indexed parent buckets.
+    candidates.sort(
+      (a, b) =>
+        a.createdAt - b.createdAt ||
+        (orderByMessage.get(a) ?? Number.POSITIVE_INFINITY) -
+          (orderByMessage.get(b) ?? Number.POSITIVE_INFINITY),
+    );
 
     const activeId = this.resolveActiveContinuationId(candidates, currentAssistant);
     if (!activeId) {
@@ -408,9 +496,10 @@ export class MessageCollector {
       sourceToolMessageId: string;
       sourceToolName: string;
     }[] = [];
+    const { childrenByParentId } = this.getFlatMessageIndexes(allMessages);
 
     for (const toolMsg of allToolMessages) {
-      const children = allMessages.filter((m) => m.parentId === toolMsg.id);
+      const children = childrenByParentId.get(toolMsg.id) ?? [];
       const callbacks: Message[] = [];
       for (const child of children) {
         if (!isCallbackSignal(getMessageSignal(child))) continue;
@@ -449,8 +538,9 @@ export class MessageCollector {
    */
   collectFlatTaskCompletions(allToolMessages: Message[], allMessages: Message[]): Message[] {
     const completions: Message[] = [];
+    const { childrenByParentId } = this.getFlatMessageIndexes(allMessages);
     for (const toolMsg of allToolMessages) {
-      const children = allMessages.filter((m) => m.parentId === toolMsg.id);
+      const children = childrenByParentId.get(toolMsg.id) ?? [];
       for (const child of children) {
         if (!isTaskCompletionSignal(getMessageSignal(child))) continue;
         completions.push(child);

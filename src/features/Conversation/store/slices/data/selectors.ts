@@ -74,9 +74,48 @@ const getDisplayMessageIndex = (messages: UIChatMessage[]): Map<string, UIChatMe
 
 const getDisplayMessageById = (id: string) => (s: State) =>
   getDisplayMessageIndex(s.displayMessages).get(id);
-const getDbMessageById = (id: string) => (s: State) => s.dbMessages.find((m) => m.id === id);
+
+interface DbMessageIndexes {
+  byId: Map<string, UIChatMessage>;
+  byToolCallId: Map<string, UIChatMessage>;
+}
+
+/**
+ * Message rows subscribe to these lookups independently. Keep both indexes in
+ * one WeakMap entry so a new immutable dbMessages snapshot is scanned once,
+ * rather than once per mounted row and selector notification.
+ *
+ * `byToolCallId` deliberately keeps the first row to preserve Array.find's
+ * behavior when an upstream reuses a call id across resumed turns.
+ */
+const dbMessageIndexCache = new WeakMap<UIChatMessage[], DbMessageIndexes>();
+
+const getDbMessageIndexes = (messages: UIChatMessage[]): DbMessageIndexes => {
+  let indexes = dbMessageIndexCache.get(messages);
+  if (indexes) return indexes;
+
+  const byId = new Map<string, UIChatMessage>();
+  const byToolCallId = new Map<string, UIChatMessage>();
+  for (const message of messages) {
+    if (!byId.has(message.id)) byId.set(message.id, message);
+    if (
+      message.tool_call_id !== null &&
+      message.tool_call_id !== undefined &&
+      !byToolCallId.has(message.tool_call_id)
+    ) {
+      byToolCallId.set(message.tool_call_id, message);
+    }
+  }
+
+  indexes = { byId, byToolCallId };
+  dbMessageIndexCache.set(messages, indexes);
+  return indexes;
+};
+
+const getDbMessageById = (id: string) => (s: State) =>
+  getDbMessageIndexes(s.dbMessages).byId.get(id);
 const getDbMessageByToolCallId = (id: string) => (s: State) =>
-  s.dbMessages.find((m) => m.tool_call_id === id);
+  getDbMessageIndexes(s.dbMessages).byToolCallId.get(id);
 
 /**
  * `createdAt` is typed as a number but arrives as a `Date` after a DB rehydrate
@@ -143,8 +182,24 @@ const findLastMessageIdRecursive = (node: UIChatMessage | undefined): string | u
  * failed turn before the replacement exists, so for a beat the user turn stands
  * alone with nothing under it and nothing to hang a loading state on.
  */
+const renderedReplyParentIdsCache = new WeakMap<UIChatMessage[], Set<string>>();
+
+const getRenderedReplyParentIds = (messages: UIChatMessage[]): Set<string> => {
+  let parentIds = renderedReplyParentIdsCache.get(messages);
+  if (parentIds) return parentIds;
+
+  parentIds = new Set();
+  for (const message of messages) {
+    if (message.parentId !== null && message.parentId !== undefined) {
+      parentIds.add(message.parentId);
+    }
+  }
+  renderedReplyParentIdsCache.set(messages, parentIds);
+  return parentIds;
+};
+
 const hasNoRenderedReply = (id: string) => (s: State) =>
-  !s.displayMessages.some((message) => message.parentId === id);
+  !getRenderedReplyParentIds(s.displayMessages).has(id);
 
 /**
  * Finds the last (deepest) message ID from a display message
@@ -196,7 +251,19 @@ const currentTopicSummary = () => {
   return topicSelectors.currentActiveTopicSummary(chatState);
 };
 
-const pendingInterventions = (s: State) => getPendingInterventions(s.displayMessages);
+const pendingInterventionsCache = new WeakMap<
+  UIChatMessage[],
+  ReturnType<typeof getPendingInterventions>
+>();
+
+const pendingInterventions = (s: State) => {
+  let pending = pendingInterventionsCache.get(s.displayMessages);
+  if (!pending) {
+    pending = getPendingInterventions(s.displayMessages);
+    pendingInterventionsCache.set(s.displayMessages, pending);
+  }
+  return pending;
+};
 
 // Works ride the message payload (attached server-side to each round's anchor
 // message), so the in-message chips read from the raw `dbMessages` (keyed by the
@@ -221,44 +288,61 @@ const toAssistantContentBlock = (message: UIChatMessage): AssistantContentBlock 
 });
 
 /**
- * Walk displayMessages (including compressed groups and agentCouncil members)
- * to find an assistant content block by its id. Used to let tool subtrees
- * self-subscribe to their own data instead of receiving it as props from the
- * message-level renderer.
+ * Tool subtrees self-subscribe to block fields, often several selectors per
+ * mounted row. The old recursive search walked the complete display tree for
+ * every selector on every store notification. Build the same depth-first index
+ * once per immutable displayMessages snapshot instead.
+ *
+ * `setBlock` never overwrites: this preserves the original walk's precedence
+ * for malformed/legacy payloads that contain duplicate ids (earlier top-level
+ * rows, child blocks, task completions, compressed rows, then council members).
  */
-const findBlockById = (
-  blockId: string,
+const displayBlockIndexCache = new WeakMap<
+  UIChatMessage[],
+  Map<string, AssistantContentBlock>
+>();
+
+const addDisplayBlocks = (
   messages: UIChatMessage[],
-): AssistantContentBlock | undefined => {
+  index: Map<string, AssistantContentBlock>,
+): void => {
+  const setBlock = (block: AssistantContentBlock) => {
+    if (!index.has(block.id)) index.set(block.id, block);
+  };
+
   for (const message of messages) {
-    if (message.role === 'assistant' && message.id === blockId) {
-      return toAssistantContentBlock(message);
+    if (message.role === 'assistant') setBlock(toAssistantContentBlock(message));
+
+    for (const block of message.children ?? []) setBlock(block);
+
+    // Post-task summaries render after SignalCallbacks but share the same block
+    // lookup contract as regular assistant-group children.
+    for (const block of
+      (message as { taskCompletions?: AssistantContentBlock[] }).taskCompletions ?? []) {
+      setBlock(block);
     }
-    if (message.children) {
-      const block = message.children.find((child) => child.id === blockId);
-      if (block) return block;
-    }
-    // Post-task summary blocks live in a separate field on virtual
-    // assistantGroup messages so they render AFTER `<SignalCallbacks>`
-    // (). Same lookup contract as `children` — the renderer
-    // identifies blocks by id regardless of which slot they came from.
-    if ((message as { taskCompletions?: AssistantContentBlock[] }).taskCompletions) {
-      const block = (
-        message as { taskCompletions?: AssistantContentBlock[] }
-      ).taskCompletions!.find((child) => child.id === blockId);
-      if (block) return block;
-    }
-    if (message.compressedMessages) {
-      const inCompressedMessages = findBlockById(blockId, message.compressedMessages);
-      if (inCompressedMessages) return inCompressedMessages;
-    }
+
+    if (message.compressedMessages) addDisplayBlocks(message.compressedMessages, index);
     if (message.role === 'agentCouncil' && (message as any).members) {
-      const inMembers = findBlockById(blockId, (message as any).members);
-      if (inMembers) return inMembers;
+      addDisplayBlocks((message as any).members, index);
     }
   }
-  return undefined;
 };
+
+const getDisplayBlockIndex = (
+  messages: UIChatMessage[],
+): Map<string, AssistantContentBlock> => {
+  let index = displayBlockIndexCache.get(messages);
+  if (index) return index;
+
+  index = new Map();
+  addDisplayBlocks(messages, index);
+  displayBlockIndexCache.set(messages, index);
+  return index;
+};
+
+const findBlockById = (blockId: string, messages: UIChatMessage[]) =>
+  getDisplayBlockIndex(messages).get(blockId);
 
 const getToolsInBlock =
   (blockId: string) =>
@@ -291,26 +375,49 @@ const getBlockHasTools =
  * thread. Drives Goal-card dedupe: once the callback card exists it absorbs
  * the Goal status header, so the creating turn's tracker card retires.
  */
+const taskCallbackTaskIdsCache = new WeakMap<UIChatMessage[], string[]>();
+
 const taskCallbackTaskIds = (s: State): string[] => {
-  const ids: string[] = [];
+  let ids = taskCallbackTaskIdsCache.get(s.displayMessages);
+  if (ids) return ids;
+
+  ids = [];
   for (const message of s.displayMessages) {
     if (message.role !== 'taskCallback') continue;
     const taskId = message.metadata?.taskCallback?.taskId;
     if (taskId) ids.push(taskId);
   }
+  taskCallbackTaskIdsCache.set(s.displayMessages, ids);
   return ids;
 };
 
 /** 1-based position of a verify message among all verify messages in the thread. */
-const getVerifyOrdinal = (id: string) => (s: State) => {
+const verifyOrdinalCache = new WeakMap<
+  UIChatMessage[],
+  { fallback: number; ordinals: Map<string, number> }
+>();
+
+const getVerifyOrdinals = (messages: UIChatMessage[]) => {
+  let cached = verifyOrdinalCache.get(messages);
+  if (cached) return cached;
+
+  const ordinals = new Map<string, number>();
   let ordinal = 0;
-  for (const message of s.displayMessages) {
-    if (message.role === 'verify') {
-      ordinal += 1;
-      if (message.id === id) return ordinal;
-    }
+  for (const message of messages) {
+    if (message.role !== 'verify') continue;
+    ordinal += 1;
+    // Preserve the first match returned by the old forward scan.
+    if (!ordinals.has(message.id)) ordinals.set(message.id, ordinal);
   }
-  return ordinal || 1;
+
+  cached = { fallback: ordinal || 1, ordinals };
+  verifyOrdinalCache.set(messages, cached);
+  return cached;
+};
+
+const getVerifyOrdinal = (id: string) => (s: State) => {
+  const { fallback, ordinals } = getVerifyOrdinals(s.displayMessages);
+  return ordinals.get(id) ?? fallback;
 };
 
 export const dataSelectors = {

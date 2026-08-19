@@ -362,6 +362,111 @@ describe('dataSelectors', () => {
     });
   });
 
+  describe('indexed message and block lookups', () => {
+    const msg = (id: string, extra: Record<string, unknown> = {}) =>
+      ({ id, role: 'assistant', ...extra }) as unknown as State['displayMessages'][number];
+
+    it('resolves regular, compressed, task-completion, and council blocks', () => {
+      const tool = { id: 'tool-1' } as any;
+      const store = createMockState({
+        displayMessages: [
+          msg('assistant-1', { content: 'top-level' }),
+          msg('group-1', {
+            children: [{ content: 'child', id: 'child-1', tools: [tool] }],
+            role: 'assistantGroup',
+            taskCompletions: [{ content: 'completed', id: 'completion-1' }],
+          }),
+          msg('compressed-shell', {
+            compressedMessages: [msg('compressed-1', { content: 'compressed' })],
+            role: 'compressedGroup',
+          }),
+          msg('council', {
+            members: [msg('member-1', { content: 'member' })],
+            role: 'agentCouncil',
+          }),
+        ],
+      });
+
+      expect(dataSelectors.getBlockContent('assistant-1')(store)).toBe('top-level');
+      expect(dataSelectors.getBlockContent('child-1')(store)).toBe('child');
+      expect(dataSelectors.getToolsInBlock('child-1')(store)).toEqual([tool]);
+      expect(dataSelectors.getBlockContent('completion-1')(store)).toBe('completed');
+      expect(dataSelectors.getBlockContent('compressed-1')(store)).toBe('compressed');
+      expect(dataSelectors.getBlockContent('member-1')(store)).toBe('member');
+    });
+
+    it('preserves depth-first precedence for duplicate block ids', () => {
+      const store = createMockState({
+        displayMessages: [
+          msg('group-1', {
+            children: [{ content: 'first child', id: 'duplicate' }],
+            role: 'assistantGroup',
+          }),
+          msg('duplicate', { content: 'later top-level' }),
+        ],
+      });
+
+      expect(dataSelectors.getBlockContent('duplicate')(store)).toBe('first child');
+    });
+
+    it('rebuilds block values for a new immutable message snapshot', () => {
+      const first = createMockState({
+        displayMessages: [msg('assistant-1', { content: 'first' })],
+      });
+      const second = createMockState({
+        displayMessages: [msg('assistant-1', { content: 'second' })],
+      });
+
+      expect(dataSelectors.getBlockContent('assistant-1')(first)).toBe('first');
+      expect(dataSelectors.getBlockContent('assistant-1')(second)).toBe('second');
+    });
+
+    it('keeps Array.find semantics for reused tool call ids', () => {
+      const first = msg('tool-old', { role: 'tool', tool_call_id: 'item-1' });
+      const second = msg('tool-new', { role: 'tool', tool_call_id: 'item-1' });
+      const store = createMockState({ dbMessages: [first, second] });
+
+      expect(dataSelectors.getDbMessageByToolCallId('item-1')(store)).toBe(first);
+      expect(dataSelectors.getDbMessageById('tool-new')(store)).toBe(second);
+    });
+
+    it('reuses derived intervention and task-callback lists for one snapshot', () => {
+      const store = createMockState({
+        displayMessages: [
+          msg('callback-1', {
+            metadata: { taskCallback: { taskId: 'task-1' } },
+            role: 'taskCallback',
+          }),
+        ],
+      });
+
+      expect(dataSelectors.pendingInterventions(store)).toBe(
+        dataSelectors.pendingInterventions(store),
+      );
+      expect(dataSelectors.taskCallbackTaskIds(store)).toBe(
+        dataSelectors.taskCallbackTaskIds(store),
+      );
+      expect(dataSelectors.taskCallbackTaskIds(store)).toEqual(['task-1']);
+    });
+
+    it('indexes rendered replies and verify ordinals without changing fallbacks', () => {
+      const store = createMockState({
+        displayMessages: [
+          msg('user-1', { role: 'user' }),
+          msg('assistant-1', { parentId: 'user-1' }),
+          msg('verify-1', { role: 'verify' }),
+          msg('verify-2', { role: 'verify' }),
+        ],
+      });
+
+      expect(dataSelectors.hasNoRenderedReply('user-1')(store)).toBe(false);
+      expect(dataSelectors.hasNoRenderedReply('user-without-reply')(store)).toBe(true);
+      expect(dataSelectors.getVerifyOrdinal('verify-1')(store)).toBe(1);
+      expect(dataSelectors.getVerifyOrdinal('verify-2')(store)).toBe(2);
+      expect(dataSelectors.getVerifyOrdinal('missing')(store)).toBe(2);
+    });
+  });
+
   describe('getToolMessageCreatedAt', () => {
     const createToolMessage = (
       createdAt: Date | number | string,

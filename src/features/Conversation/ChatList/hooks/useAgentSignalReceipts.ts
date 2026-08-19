@@ -18,6 +18,32 @@ export type AgentSignalReceiptView = Awaited<
   ReturnType<typeof agentSignalService.listReceipts>
 >['receipts'][number];
 
+const EMPTY_RECEIPTS: AgentSignalReceiptView[] = [];
+const EMPTY_RECEIPTS_BY_ANCHOR = new Map<string, AgentSignalReceiptView[]>();
+
+/**
+ * Keep the map identity stable when streaming only changes message content.
+ * ChatList closes over this map in its item renderer; returning a fresh but
+ * equivalent Map would invalidate VirtualizedList.memo and re-render every
+ * mounted row for an unrelated token update.
+ */
+const receiptGroupsEqual = (
+  left: Map<string, AgentSignalReceiptView[]>,
+  right: Map<string, AgentSignalReceiptView[]>,
+): boolean => {
+  if (left === right) return true;
+  if (left.size !== right.size) return false;
+
+  for (const [anchor, leftReceipts] of left) {
+    const rightReceipts = right.get(anchor);
+    if (!rightReceipts || leftReceipts.length !== rightReceipts.length) return false;
+    for (let i = 0; i < leftReceipts.length; i++) {
+      if (leftReceipts[i] !== rightReceipts[i]) return false;
+    }
+  }
+  return true;
+};
+
 export const useAgentSignalReceipts = (input: {
   agentId?: string | null;
   displayMessages: UIChatMessage[];
@@ -100,16 +126,25 @@ export const useAgentSignalReceipts = (input: {
     },
   );
 
-  const receipts = data?.receipts ?? [];
+  const receipts = data?.receipts ?? EMPTY_RECEIPTS;
+  const previousReceiptsByAnchorRef = useRef(EMPTY_RECEIPTS_BY_ANCHOR);
 
-  const receiptsByAnchor = useMemo(
-    () =>
-      groupAgentSignalReceiptsByEffectiveAnchor({
-        displayMessages: input.displayMessages,
-        receipts,
-      }),
-    [input.displayMessages, receipts],
-  );
+  const receiptsByAnchor = useMemo(() => {
+    if (!shouldFetch || receipts.length === 0) {
+      previousReceiptsByAnchorRef.current = EMPTY_RECEIPTS_BY_ANCHOR;
+      return EMPTY_RECEIPTS_BY_ANCHOR;
+    }
+
+    const next = groupAgentSignalReceiptsByEffectiveAnchor({
+      displayMessages: input.displayMessages,
+      receipts,
+    });
+    const previous = previousReceiptsByAnchorRef.current;
+    if (receiptGroupsEqual(previous, next)) return previous;
+
+    previousReceiptsByAnchorRef.current = next;
+    return next;
+  }, [input.displayMessages, receipts, shouldFetch]);
 
   return {
     isLoading,

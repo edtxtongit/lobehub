@@ -592,6 +592,32 @@ describe('MessageCollector', () => {
       expect(allToolMessages.map((m) => m.id)).toEqual(['tool-1', 'tool-2']);
     });
 
+    it('preserves source-array order when indexed continuation candidates have equal timestamps', () => {
+      const astRoot = mkAssistant('ast-root', {
+        parentId: 'user-root',
+        tools: [bashTool('tc-1')],
+      });
+      const directContinuation = mkAssistant('ast-direct', {
+        createdAt: 1,
+        parentId: 'ast-root',
+      });
+      const tool = mkTool('tool-1', { parentId: 'ast-root', tool_call_id: 'tc-1' });
+      const toolContinuation = mkAssistant('ast-under-tool', {
+        createdAt: 1,
+        parentId: 'tool-1',
+      });
+      // The direct continuation appears first in the source snapshot, while the
+      // relationship index gathers tool-parent candidates first. Equal-time
+      // ordering must still match the original stable allMessages.filter/sort.
+      const allMessages = [astRoot, directContinuation, tool, toolContinuation];
+      const collector = new MessageCollector(new Map(), new Map());
+
+      const assistantChain: Message[] = [];
+      collector.collectAssistantChain(astRoot, allMessages, assistantChain, [], new Set());
+
+      expect(assistantChain.map((message) => message.id)).toEqual(['ast-root', 'ast-direct']);
+    });
+
     it('uses the latest user descendant when the default resolver selects a continuation', () => {
       const astRoot = mkAssistant('ast-root', {
         parentId: 'user-root',

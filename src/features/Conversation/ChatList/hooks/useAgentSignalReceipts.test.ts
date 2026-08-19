@@ -230,6 +230,88 @@ describe('useAgentSignalReceipts', () => {
     expect(agentSignalService.listReceipts).not.toHaveBeenCalled();
   });
 
+  it('keeps an empty receipt map stable across content-only message updates', () => {
+    const firstMessages = [message({ content: 'a', id: 'assistant-1', role: 'assistant' })];
+    const { result, rerender } = renderHook(
+      ({ displayMessages }) =>
+        useAgentSignalReceipts({
+          agentId: 'agent-1',
+          displayMessages,
+          enabled: false,
+          topicId: 'topic-1',
+        }),
+      { initialProps: { displayMessages: firstMessages }, wrapper },
+    );
+    const firstMap = result.current.receiptsByAnchor;
+
+    rerender({
+      displayMessages: [message({ content: 'a growing reply', id: 'assistant-1', role: 'assistant' })],
+    });
+
+    expect(result.current.receiptsByAnchor).toBe(firstMap);
+    expect(agentSignalService.listReceipts).not.toHaveBeenCalled();
+  });
+
+  it('keeps grouped receipt identity stable when only anchor content changes', async () => {
+    const firstMessages = [message({ content: 'a', id: 'assistant-1', role: 'assistant' })];
+    const { result, rerender } = renderHook(
+      ({ displayMessages }) =>
+        useAgentSignalReceipts({
+          agentId: 'agent-1',
+          displayMessages,
+          enabled: true,
+          topicId: 'topic-1',
+        }),
+      { initialProps: { displayMessages: firstMessages }, wrapper },
+    );
+
+    await waitFor(() => expect(result.current.receiptsByAnchor.has('assistant-1')).toBe(true));
+    const firstMap = result.current.receiptsByAnchor;
+
+    rerender({
+      displayMessages: [message({ content: 'a growing reply', id: 'assistant-1', role: 'assistant' })],
+    });
+
+    expect(result.current.receiptsByAnchor).toBe(firstMap);
+  });
+
+  it('rebuilds grouped receipts when a streamed child anchor moves into a group', async () => {
+    vi.mocked(agentSignalService.listReceipts).mockResolvedValueOnce({
+      cursor: undefined,
+      receipts: [{ ...receipt, anchorMessageId: 'assistant-1' }],
+    });
+    const firstMessages = [message({ id: 'assistant-1', role: 'assistant' })];
+    const { result, rerender } = renderHook(
+      ({ displayMessages }) =>
+        useAgentSignalReceipts({
+          agentId: 'agent-1',
+          displayMessages,
+          enabled: true,
+          topicId: 'topic-1',
+        }),
+      { initialProps: { displayMessages: firstMessages }, wrapper },
+    );
+
+    await waitFor(() => expect(result.current.receiptsByAnchor.has('assistant-1')).toBe(true));
+    const firstMap = result.current.receiptsByAnchor;
+
+    rerender({
+      displayMessages: [
+        message({
+          children: [{ content: 'grouped', id: 'assistant-1' }],
+          id: 'group-1',
+          role: 'assistantGroup',
+        }),
+      ],
+    });
+
+    expect(result.current.receiptsByAnchor).not.toBe(firstMap);
+    expect(result.current.receiptsByAnchor.has('assistant-1')).toBe(false);
+    expect(result.current.receiptsByAnchor.get('group-1')).toEqual([
+      expect.objectContaining({ id: 'receipt-1' }),
+    ]);
+  });
+
   it('keeps refreshing receipts while the current topic is mounted', async () => {
     vi.useFakeTimers();
     vi.mocked(agentSignalService.listReceipts)
