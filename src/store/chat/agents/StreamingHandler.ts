@@ -154,6 +154,13 @@ export class StreamingHandler {
       this.msgTraceId = finishData.traceId;
     }
 
+    // PERF/UX: content updates are throttled; the trailing batch must reach
+    // the store before the turn settles. This used to rely solely on the
+    // flush inside processFinalToolCalls — which never runs for plain-text
+    // turns (`!toolCalls?.length` early return), leaving the last frame stuck
+    // on the trailing timer for up to 60ms.
+    this.throttledContentUpdate.flush();
+
     // Wait for all image uploads to complete
     const finalImages = await this.waitForImageUploads();
 

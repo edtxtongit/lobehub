@@ -21,20 +21,24 @@ const AutoScroll = memo(() => {
   const isScrolling = useConversationStore(virtuaListSelectors.isScrolling);
   const isGenerating = useConversationStore(messageStateSelectors.isAIGenerating);
   const scrollToBottom = useConversationStore((s) => s.scrollToBottom);
-  const dbMessages = useConversationStore(dataSelectors.dbMessages);
+
+  // PERF: subscribing to the whole `dbMessages` array re-rendered this
+  // component on EVERY streaming store write (the array identity changes per
+  // token batch). Primitive selectors (numbers) re-render only when the value
+  // actually changes — which is all the effect below depends on.
+  const lastMessageContentLength = useConversationStore((s) => {
+    const last = dataSelectors.dbMessages(s).at(-1);
+    return typeof last?.content === 'string' ? last.content.length : 0;
+  });
+  const messageCount = useConversationStore((s) => dataSelectors.dbMessages(s).length);
 
   const shouldAutoScroll = atBottom && isGenerating && !isScrolling;
-
-  // Get the content length of the last message to monitor streaming output
-  const lastMessage = dbMessages.at(-1);
-  const lastMessageContentLength =
-    typeof lastMessage?.content === 'string' ? lastMessage.content.length : 0;
 
   useEffect(() => {
     if (shouldAutoScroll) {
       scrollToBottom(false);
     }
-  }, [shouldAutoScroll, scrollToBottom, dbMessages.length, lastMessageContentLength]);
+  }, [shouldAutoScroll, scrollToBottom, messageCount, lastMessageContentLength]);
 
   // No visual output - this component only handles auto-scroll logic
   return null;

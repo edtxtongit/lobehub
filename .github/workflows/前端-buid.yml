@@ -1,0 +1,55 @@
+name: Streaming Frontend Verification
+
+on:
+  push:
+    branches: [arena/01a0193e-lobehub]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: streaming-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  streaming-frontend:
+    name: Mock AI stream + SPA build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup environment
+        uses: ./.github/actions/setup-env
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Test conversation-flow incremental rendering
+        run: bun run --filter @lobechat/conversation-flow test --run
+
+      - name: Test mocked AI reply path
+        run: bunx vitest run src/store/chat/agents/__tests__/clientRuntimeExecutors/call-llm.test.ts
+
+      - name: Build browser SPA
+        run: bun run build:spa:raw
+        env:
+          SKIP_LINT: "1"
+
+      # vite emits the web variant to dist/desktop with asset base /_spa/, but
+      # the directory name must match that base so the extracted artifact serves
+      # correctly at the site root (index.html references /_spa/assets/...).
+      - name: Layout SPA under _spa/
+        run: |
+          rm -rf dist/_spa
+          mv dist/desktop dist/_spa
+
+      - name: Upload browser build
+        uses: actions/upload-artifact@v6
+        with:
+          name: streaming-frontend-spa
+          path: dist
+          retention-days: 3

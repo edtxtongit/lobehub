@@ -8,6 +8,7 @@ import { type ChatStore } from '@/store/chat/store';
 import { type StoreSetter } from '@/store/types';
 
 import { displayMessageSelectors } from '../../../selectors';
+import { pruneContextMaps, trackContextWrite } from '../../../utils/contextCacheEviction';
 import { messageMapKey } from '../../../utils/messageMapKey';
 import { type MessageDispatch } from '../reducer';
 import { messagesReducer } from '../reducer';
@@ -72,6 +73,7 @@ export class MessageInternalsActionImpl {
     // so a reference check is equivalent and O(1).
     if (reconciled === rawMessages) return;
 
+    trackContextWrite(messagesKey);
     const nextDbMap = { ...this.#get().dbMessagesMap, [messagesKey]: reconciled };
 
     // PERF: streaming tokens only ever change one message's content/reasoning —
@@ -87,10 +89,19 @@ export class MessageInternalsActionImpl {
     const flatList = patched ?? parse(reconciled).flatList;
     const nextDisplayMap = { ...this.#get().messagesMap, [messagesKey]: flatList };
 
-    this.#set({ dbMessagesMap: nextDbMap, messagesMap: nextDisplayMap }, false, {
-      payload,
-      type: `dispatchMessage/${payload.type}`,
-    });
+    // STABILITY: without a cap these two maps grow with every context the
+    // session ever touches (one entry per sub-thread during group runs) until
+    // the renderer OOMs. Evicts idle contexts only; see contextCacheEviction.
+    const pruned = pruneContextMaps(nextDbMap, nextDisplayMap, messagesKey);
+
+    this.#set(
+      { dbMessagesMap: pruned.dbMessagesMap, messagesMap: pruned.messagesMap },
+      false,
+      {
+        payload,
+        type: `dispatchMessage/${payload.type}`,
+      },
+    );
   };
 
   internal_traceMessage = async (id: string, payload: TraceEventPayloads): Promise<void> => {

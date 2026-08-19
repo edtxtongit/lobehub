@@ -12,26 +12,68 @@ import { getPendingInterventions } from './pendingInterventions';
 import { getWorkSummariesByRootOperationId } from './workSummaries';
 
 const displayMessages = (s: State) => s.displayMessages;
-const displayMessageIds = (s: State) => s.displayMessages.map((m) => m.id);
+
+/**
+ * PERF: memoize the id array per displayMessages identity. The selector body
+ * ran an O(n) `.map()` allocation on every store notification, and the fresh
+ * array forced ChatList's `useShallow` comparator into an element-wise walk
+ * each time. With a stable identity the shallow check short-circuits on
+ * reference equality. Values are identical — the store contract is immutable
+ * updates, so a given displayMessages array always maps to the same ids.
+ */
+const displayMessageIdsCache = new WeakMap<UIChatMessage[], string[]>();
+
+const displayMessageIds = (s: State): string[] => {
+  let ids = displayMessageIdsCache.get(s.displayMessages);
+  if (!ids) {
+    ids = s.displayMessages.map((m) => m.id);
+    displayMessageIdsCache.set(s.displayMessages, ids);
+  }
+  return ids;
+};
 const dbMessages = (s: State) => s.dbMessages;
 const messagesInit = (s: State) => s.messagesInit;
 const skipFetch = (s: State) => s.skipFetch;
 
-const getDisplayMessageById = (id: string) => (s: State) => {
-  // First, try to find in top-level displayMessages
-  const topLevelMessage = s.displayMessages.find((m) => m.id === id);
-  if (topLevelMessage) return topLevelMessage;
+/**
+ * PERF: `getDisplayMessageById` is subscribed 2-4x per mounted message row,
+ * so on EVERY store notification (scroll state writes, streaming writes,
+ * activeIndex changes…) the old implementation ran a full O(n) `.find()` scan
+ * per subscription — O(rows × messages) per notification, which dominated
+ * scroll frame budgets on long topics. A WeakMap-keyed id index rebuilds only
+ * when the displayMessages array identity changes (≤ once per streaming
+ * commit) and answers lookups in O(1).
+ *
+ * Precedence is preserved exactly: a top-level message always wins over an
+ * agentCouncil member with the same id.
+ */
+const displayMessageIndexCache = new WeakMap<UIChatMessage[], Map<string, UIChatMessage>>();
 
-  // If not found, search in agentCouncil members
-  for (const message of s.displayMessages) {
+const getDisplayMessageIndex = (messages: UIChatMessage[]): Map<string, UIChatMessage> => {
+  let index = displayMessageIndexCache.get(messages);
+  if (index) return index;
+
+  index = new Map();
+  // Pass 1: top-level messages take precedence.
+  for (const message of messages) {
+    if (!index.has(message.id)) index.set(message.id, message);
+  }
+  // Pass 2: agentCouncil members are only indexed when no top-level row owns
+  // the id (mirrors the original find-then-fallback order).
+  for (const message of messages) {
     if (message.role === 'agentCouncil' && (message as any).members) {
-      const member = (message as any).members.find((m: UIChatMessage) => m.id === id);
-      if (member) return member;
+      for (const member of (message as any).members as UIChatMessage[]) {
+        if (!index.has(member.id)) index.set(member.id, member);
+      }
     }
   }
 
-  return undefined;
+  displayMessageIndexCache.set(messages, index);
+  return index;
 };
+
+const getDisplayMessageById = (id: string) => (s: State) =>
+  getDisplayMessageIndex(s.displayMessages).get(id);
 const getDbMessageById = (id: string) => (s: State) => s.dbMessages.find((m) => m.id === id);
 const getDbMessageByToolCallId = (id: string) => (s: State) =>
   s.dbMessages.find((m) => m.tool_call_id === id);
