@@ -17,6 +17,7 @@ import {
   inputSelectors,
   messageStateSelectors,
   useConversationStore,
+  useConversationStoreApi,
   virtuaListSelectors,
 } from '../../store';
 import {
@@ -108,7 +109,12 @@ const VirtualizedList = memo<VirtualizedListProps>(
     const setScrollState = useConversationStore((s) => s.setScrollState);
     const resetVisibleItems = useConversationStore((s) => s.resetVisibleItems);
     const setActiveIndex = useConversationStore((s) => s.setActiveIndex);
-    const activeIndex = useConversationStore(virtuaListSelectors.activeIndex);
+    // PERF: `activeIndex` is ONLY needed inside the scroll handler. Subscribing
+    // to it re-rendered this whole component (including a fresh inline VList
+    // children closure → every mounted row re-render) on every row crossing
+    // while scrolling. Reading it from the store API at event time is
+    // behavior-identical and costs O(1).
+    const conversationStoreApi = useConversationStoreApi();
 
     const markUserScrollIntent = useCallback(() => {
       lastUserScrollIntentAtRef.current = Date.now();
@@ -158,6 +164,7 @@ const VirtualizedList = memo<VirtualizedListProps>(
           ? Math.max(0, activeFromFindRaw - headerOffsetRef.current)
           : null;
 
+      const activeIndex = virtuaListSelectors.activeIndex(conversationStoreApi.getState());
       if (activeFromFind !== activeIndex) setActiveIndex(activeFromFind);
 
       setScrollState({ isScrolling: true });
@@ -187,7 +194,14 @@ const VirtualizedList = memo<VirtualizedListProps>(
       scrollEndTimerRef.current = setTimeout(() => {
         setScrollState({ isScrolling: false });
       }, 150);
-    }, [activeIndex, checkAtBottom, onScrollOffset, recordScroll, setActiveIndex, setScrollState]);
+    }, [
+      conversationStoreApi,
+      checkAtBottom,
+      onScrollOffset,
+      recordScroll,
+      setActiveIndex,
+      setScrollState,
+    ]);
 
     const handleScrollEnd = useCallback(() => {
       setScrollState({ isScrolling: false });
@@ -237,14 +251,39 @@ const VirtualizedList = memo<VirtualizedListProps>(
 
     // Keep currently-streaming items mounted so vlist recycling never triggers
     // Markdown animation replay when the user scrolls them back into view.
+    //
+    // PERF: the selector body loops the WHOLE conversation and calls
+    // isMessageGenerating per row — and zustand evaluates it on EVERY store
+    // notification (scroll writes included). Its output only depends on
+    // (dataSource identity, operationState identity) — the latter is rebuilt
+    // by useOperationState whenever any operation slice changes — so cache the
+    // result pair and skip the O(n) walk when neither moved. Output is
+    // bit-for-bit identical whenever either input changed.
+    const streamingCacheRef = useRef<{
+      dataSource: string[];
+      indices: number[];
+      operationState: unknown;
+    } | null>(null);
+
     const streamingIndices = useConversationStore(
       useShallow((s) => {
+        const cache = streamingCacheRef.current;
+        if (
+          cache &&
+          cache.dataSource === dataSource &&
+          cache.operationState === s.operationState
+        ) {
+          return cache.indices;
+        }
+
         const indices: number[] = [];
         for (let i = 0; i < dataSource.length; i++) {
           const id = dataSource[i];
           if (!id) continue;
           if (messageStateSelectors.isMessageGenerating(id)(s)) indices.push(i);
         }
+
+        streamingCacheRef.current = { dataSource, indices, operationState: s.operationState };
         return indices;
       }),
     );

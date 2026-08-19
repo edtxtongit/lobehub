@@ -71,6 +71,13 @@ export const useChatMarkdown = ({
         enableStream,
         rehypePlugins,
         remarkPlugins,
+        // PERF: default 'char' wraps EVERY character in its own animated span
+        // (opacity fade) — a long reply creates tens of thousands of
+        // concurrently-managed CSS animations, which is the dominant GPU /
+        // compositor load during streaming. 'word' cuts the animated node
+        // count ~5x (lobe-ui's own recommendation) and uses Intl.Segmenter so
+        // CJK text still fades in word-by-word instead of as one giant block.
+        streamAnimationGranularity: 'word',
         showFootnotes: !citations?.length || citations.every((item) => item.title !== item.url),
       }) satisfies Partial<MarkdownProps>,
     [animated, citations, components, enableStream],

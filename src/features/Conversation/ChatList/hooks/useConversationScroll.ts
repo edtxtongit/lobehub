@@ -159,6 +159,41 @@ const useSpacerHeight = ({
   const removeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesObserverRef = useRef<ResizeObserver | null>(null);
 
+  // PERF: coalesce the scroll-shrink accumulation into ONE state write per
+  // animation frame. Scroll events can fire several times between frames
+  // (wheel/touchpad); a synchronous setScrollReduction per event re-rendered
+  // the whole VirtualizedList and re-laid-out the spacer per event. The
+  // accumulated total is identical — it only lands at frame boundaries, which
+  // is when the spacer height is painted anyway.
+  const pendingShrinkRef = useRef(0);
+  const shrinkFrameRef = useRef<number | null>(null);
+
+  const accumulateScrollShrink = useCallback((delta: number) => {
+    if (delta <= 0) return;
+    pendingShrinkRef.current += delta;
+    if (shrinkFrameRef.current === null) {
+      shrinkFrameRef.current = requestAnimationFrame(() => {
+        shrinkFrameRef.current = null;
+        const pending = pendingShrinkRef.current;
+        pendingShrinkRef.current = 0;
+        if (pending > 0) setScrollReduction((prev) => prev + pending);
+      });
+    }
+  }, []);
+
+  // Atomic reset: must cancel any in-flight batched shrink BEFORE zeroing,
+  // otherwise the pending frame could apply a stale reduction AFTER the reset
+  // (e.g. a scroll-up event racing a context switch or a new send) and shrink
+  // the NEXT spacer by the previous conversation's amount.
+  const resetScrollShrink = useCallback(() => {
+    if (shrinkFrameRef.current !== null) {
+      cancelAnimationFrame(shrinkFrameRef.current);
+      shrinkFrameRef.current = null;
+    }
+    pendingShrinkRef.current = 0;
+    setScrollReduction(() => 0);
+  }, []);
+
   const renderedHeight = Math.max(naturalHeight - scrollReduction, 0);
   const isScrollShrinking = scrollReduction > 0;
 
@@ -267,16 +302,18 @@ const useSpacerHeight = ({
     return () => {
       cleanupMessagesObserver();
       clearRemoveTimer();
+      if (shrinkFrameRef.current !== null) cancelAnimationFrame(shrinkFrameRef.current);
     };
   }, [cleanupMessagesObserver, clearRemoveTimer]);
 
   return {
+    accumulateScrollShrink,
     isScrollShrinking,
     mounted,
     mountedRef,
     renderedHeight,
+    resetScrollShrink,
     setMounted,
-    setScrollReduction,
     updateSpacerHeight,
   };
 };
@@ -347,21 +384,21 @@ const usePinController = ({
 // fight the assistant's growth animation.
 // ---------------------------------------------------------------------------
 interface UseScrollShrinkArgs {
+  accumulateScrollShrink: (delta: number) => void;
   clearPin: (reason: string) => void;
   getScrollOffset: (() => number) | undefined;
   isAIGenerating: boolean;
   isAIGeneratingRef: RefObject<boolean>;
   mountedRef: RefObject<boolean>;
-  setScrollReduction: (updater: (prev: number) => number) => void;
 }
 
 const useScrollShrink = ({
+  accumulateScrollShrink,
   clearPin,
   getScrollOffset,
   isAIGenerating,
   isAIGeneratingRef,
   mountedRef,
-  setScrollReduction,
 }: UseScrollShrinkArgs) => {
   const prevScrollOffsetRef = useRef<number | null>(null);
   const scrollShrinkEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -386,14 +423,17 @@ const useScrollShrink = ({
 
       if (!shrinkSpacer) return;
 
-      setScrollReduction((prev) => prev + Math.abs(delta));
+      // Frame-batched by useSpacerHeight: scroll events can fire several times
+      // between frames, and a synchronous state write per event re-rendered
+      // the whole list per event. The accumulated total is identical.
+      accumulateScrollShrink(Math.abs(delta));
 
       if (scrollShrinkEndTimerRef.current) clearTimeout(scrollShrinkEndTimerRef.current);
       scrollShrinkEndTimerRef.current = setTimeout(() => {
         scrollShrinkEndTimerRef.current = null;
       }, SCROLL_SHRINK_END_DELAY_MS);
     },
-    [clearPin, isAIGeneratingRef, mountedRef, setScrollReduction],
+    [accumulateScrollShrink, clearPin, isAIGeneratingRef, mountedRef],
   );
 
   // Seed prev offset on generation flip — avoids stale deltas across streaming boundaries.
@@ -498,12 +538,13 @@ export const useConversationScroll = ({
   }, [assistantMessageIndex, dataSource, displayMessages]);
 
   const {
+    accumulateScrollShrink,
     isScrollShrinking,
     mounted,
     mountedRef,
     renderedHeight,
+    resetScrollShrink,
     setMounted,
-    setScrollReduction,
     updateSpacerHeight,
   } = useSpacerHeight({
     assistantMessageIndex,
@@ -518,12 +559,12 @@ export const useConversationScroll = ({
   const { clearPin, pinRef, scrollToPinned } = usePinController({ headerOffset, virtuaRef });
 
   const { onScrollOffset, prevScrollOffsetRef } = useScrollShrink({
+    accumulateScrollShrink,
     clearPin,
     getScrollOffset,
     isAIGenerating,
     isAIGeneratingRef,
     mountedRef,
-    setScrollReduction,
   });
 
   // useLayoutEffect: runs before the passive send-detection effect in the
@@ -540,9 +581,9 @@ export const useConversationScroll = ({
     setUserMessageIndex(null);
     setAssistantMessageIndex(null);
     setMounted(false);
-    setScrollReduction(() => 0);
+    resetScrollShrink();
     prevScrollOffsetRef.current = null;
-  }, [contextKey]);
+  }, [contextKey, resetScrollShrink]);
 
   // --- send detection: single source of truth ---
   useEffect(() => {
@@ -560,7 +601,7 @@ export const useConversationScroll = ({
 
     log('send detected userIndex=%d', userIndex);
 
-    setScrollReduction(() => 0);
+    resetScrollShrink();
     prevScrollOffsetRef.current = getScrollOffset?.() ?? null;
     setUserMessageIndex(userIndex);
     setAssistantMessageIndex(assistantIndex);
@@ -581,8 +622,8 @@ export const useConversationScroll = ({
     mountedRef,
     pinRef,
     prevScrollOffsetRef,
+    resetScrollShrink,
     scrollToPinned,
-    setScrollReduction,
     updateSpacerHeight,
   ]);
 
@@ -609,7 +650,7 @@ export const useConversationScroll = ({
   useEffect(() => {
     if (renderedHeight === 0 && mounted && isScrollShrinking) {
       setMounted(false);
-      setScrollReduction(() => 0);
+      resetScrollShrink();
       prevScrollOffsetRef.current = null;
     }
   }, [
@@ -617,8 +658,8 @@ export const useConversationScroll = ({
     mounted,
     prevScrollOffsetRef,
     renderedHeight,
+    resetScrollShrink,
     setMounted,
-    setScrollReduction,
   ]);
 
   // Recompute spacer height when generation state or tail signature flips.

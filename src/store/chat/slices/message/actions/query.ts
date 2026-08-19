@@ -23,6 +23,7 @@ import {
 } from '@/store/chat/utils/localMessages';
 import { type StoreSetter } from '@/store/types';
 
+import { pruneContextMaps, trackContextWrite } from '../../../utils/contextCacheEviction';
 import { type MessageMapKeyInput } from '../../../utils/messageMapKey';
 import { messageMapKey } from '../../../utils/messageMapKey';
 import { reconcileAssistantToolLinks } from '../utils/reconcileTools';
@@ -256,12 +257,21 @@ export class MessageQueryActionImpl {
     // Parse messages using conversation-flow
     const { flatList } = parse(reconciled);
 
+    // STABILITY: cap resident conversation contexts (raw + parsed maps are
+    // never pruned otherwise); evicts idle contexts only.
+    trackContextWrite(messagesKey);
+    const pruned = pruneContextMaps(
+      nextDbMap,
+      { ...this.#get().messagesMap, [messagesKey]: flatList },
+      messagesKey,
+    );
+
     this.#set(
       {
         // Store raw messages from backend
-        dbMessagesMap: nextDbMap,
+        dbMessagesMap: pruned.dbMessagesMap,
         // Store parsed messages for display
-        messagesMap: { ...this.#get().messagesMap, [messagesKey]: flatList },
+        messagesMap: pruned.messagesMap,
       },
       false,
       params?.action ?? 'replaceMessages',

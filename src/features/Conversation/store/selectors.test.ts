@@ -321,6 +321,47 @@ describe('conversationSelectors', () => {
 });
 
 describe('dataSelectors', () => {
+  describe('getDisplayMessageById', () => {
+    const msg = (id: string, extra: Record<string, unknown> = {}) =>
+      ({ id, role: 'assistant', ...extra }) as unknown as State['displayMessages'][number];
+
+    it('finds a top-level message', () => {
+      const store = createMockState({ displayMessages: [msg('a'), msg('b')] });
+      expect(dataSelectors.getDisplayMessageById('b')(store)?.id).toBe('b');
+    });
+
+    it('returns undefined for an unknown id', () => {
+      const store = createMockState({ displayMessages: [msg('a')] });
+      expect(dataSelectors.getDisplayMessageById('ghost')(store)).toBeUndefined();
+    });
+
+    it('finds agentCouncil members when no top-level row owns the id', () => {
+      const member = msg('member-1');
+      const council = msg('council-1', { members: [member], role: 'agentCouncil' });
+      const store = createMockState({ displayMessages: [msg('a'), council] });
+
+      expect(dataSelectors.getDisplayMessageById('member-1')(store)).toBe(member);
+    });
+
+    it('a top-level message wins over an agentCouncil member with the same id', () => {
+      const topLevel = msg('dup');
+      const member = msg('dup');
+      const council = msg('council-1', { members: [member], role: 'agentCouncil' });
+      const store = createMockState({ displayMessages: [topLevel, council] });
+
+      expect(dataSelectors.getDisplayMessageById('dup')(store)).toBe(topLevel);
+    });
+
+    it('answers from the cached index when the array identity is unchanged', () => {
+      const displayMessages = [msg('a'), msg('b')];
+      const store = createMockState({ displayMessages });
+      expect(dataSelectors.getDisplayMessageById('a')(store)?.id).toBe('a');
+      expect(dataSelectors.getDisplayMessageById('b')(store)?.id).toBe('b');
+      // Same array reference → same Map instance (WeakMap cache hit path).
+      expect(dataSelectors.getDisplayMessageById('a')(store)).toBe(displayMessages[0]);
+    });
+  });
+
   describe('getToolMessageCreatedAt', () => {
     const createToolMessage = (
       createdAt: Date | number | string,
