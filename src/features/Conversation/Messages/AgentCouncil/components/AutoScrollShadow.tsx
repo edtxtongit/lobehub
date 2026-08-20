@@ -29,9 +29,7 @@ const AutoScrollShadow = memo<AutoScrollShadowProps>(({ children, content, strea
   }, [content, resetScrollLock]);
 
   return (
-    <ScrollArea
-      scrollFade
-      style={{ background: 'transparent', borderRadius: 0 }}
+    <ScrollArea style={{ background: 'transparent', borderRadius: 0 }}
       contentProps={{
         style: {
           color: 'inherit',

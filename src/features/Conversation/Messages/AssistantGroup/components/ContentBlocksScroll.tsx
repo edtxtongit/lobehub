@@ -91,7 +91,6 @@ const ContentBlocksScroll = memo<ContentBlocksScrollProps>((props) => {
   return (
     <ScrollArea
       disableContentFit
-      scrollFade
       className={styles.scrollRoot}
       contentProps={{
         style: {

@@ -34,9 +34,7 @@ export const getExecutor = (identifier: string): IBuiltinToolExecutor | undefine
  * @returns Whether the executor exists and supports the API
  */
 export const hasExecutor = async (identifier: string, apiName: string): Promise<boolean> => {
-  await registerBuiltinToolExecutors();
-
-  const executor = executorRegistry.get(identifier);
+  const executor = await getOrLoadExecutor(identifier);
   return executor?.hasApi(apiName) ?? false;
 };
 
@@ -75,9 +73,7 @@ export const invokeExecutor = async (
   params: any,
   ctx: BuiltinToolContext,
 ): Promise<BuiltinToolResult> => {
-  await registerBuiltinToolExecutors();
-
-  const executor = executorRegistry.get(identifier);
+  const executor = await getOrLoadExecutor(identifier);
 
   if (!executor) {
     return {
@@ -119,6 +115,45 @@ const registerExecutors = (executors: IBuiltinToolExecutor[]): void => {
   for (const executor of executors) {
     executorRegistry.set(executor.identifier, executor);
   }
+};
+
+type ExecutorLoader = () => Promise<IBuiltinToolExecutor>;
+
+// High-frequency browser executors can be split out safely one identifier at a
+// time. Unknown/unlisted identifiers retain the complete catalog fallback, so
+// adding this fast path cannot make an existing executor unavailable.
+const targetedExecutorLoaders: Record<string, ExecutorLoader> = {
+  'lobe-web-onboarding': () =>
+    import('./lobe-web-onboarding').then(({ webOnboardingExecutor }) => webOnboardingExecutor),
+};
+const targetedExecutorPromises = new Map<string, Promise<IBuiltinToolExecutor>>();
+
+/** Load one split executor, falling back to the legacy complete catalog. */
+export const getOrLoadExecutor = async (
+  identifier: string,
+): Promise<IBuiltinToolExecutor | undefined> => {
+  const registered = executorRegistry.get(identifier);
+  if (registered) return registered;
+
+  const loader = targetedExecutorLoaders[identifier];
+  if (loader) {
+    let promise = targetedExecutorPromises.get(identifier);
+    if (!promise) {
+      promise = loader();
+      targetedExecutorPromises.set(identifier, promise);
+    }
+    try {
+      const executor = await promise;
+      executorRegistry.set(executor.identifier, executor);
+      return executor.identifier === identifier ? executor : executorRegistry.get(identifier);
+    } catch (error) {
+      targetedExecutorPromises.delete(identifier);
+      throw error;
+    }
+  }
+
+  await registerBuiltinToolExecutors();
+  return executorRegistry.get(identifier);
 };
 
 export const registerBuiltinToolExecutors = async (): Promise<void> => {

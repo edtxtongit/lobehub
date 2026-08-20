@@ -27,13 +27,16 @@ export const dotLoading = css`
   }
 `;
 
+// Animate only opacity so loading feedback stays on the compositor. Animating
+// background-position on background-clipped text repaints every frame and keeps
+// the whole conversation rendering pipeline active for the duration of a run.
 const shine = keyframes`
-  0% {
-    background-position: 100%;
+  0%, 100% {
+    opacity: 0.5;
   }
 
-  100% {
-    background-position: -100%;
+  50% {
+    opacity: 1;
   }
 `;
 
@@ -57,11 +60,14 @@ export const shinyTextStyles = createStaticStyles(({ css, cssVar }) => ({
       color-mix(in srgb, ${cssVar.colorTextBase} 0%, transparent) 60%
     );
     background-clip: text;
+    background-position: 50%;
     background-size: 200% 100%;
 
-    animation: ${shine} 1.5s linear infinite;
+    will-change: opacity;
+    animation: ${shine} 1.5s ease-in-out infinite;
 
     @media (prefers-reduced-motion: reduce) {
+      opacity: 1;
       animation: none;
     }
   `,

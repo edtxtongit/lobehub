@@ -45,14 +45,12 @@ export const isCompletedRuntimeEnd = (reason?: string | null): boolean =>
   !NON_COMPLETION_RUNTIME_END_REASONS.has(reason ?? '');
 
 // Lazy-loaded to break the import cycle:
-//   gateway.ts → gatewayEventHandler.ts → executors/index.ts (which pulls in
-//   tool client barrels that import `@/store/chat/store`) → chat store
-//   creation → `new GatewayActionImpl(...)` while gateway.ts is still
-//   mid-evaluation, so the class binding is undefined.
+//   gateway.ts → gatewayEventHandler.ts → executors/index.ts → tool clients →
+//   chat store creation. Resolve only the event's executor; loading the complete
+//   catalog here made a single onboarding tool evaluate every builtin package.
 const loadGetExecutor = async () => {
   const mod = await import('@/store/tool/slices/builtin/executors');
-  await mod.registerBuiltinToolExecutors();
-  return mod.getExecutor;
+  return mod.getOrLoadExecutor;
 };
 
 /**
@@ -188,7 +186,7 @@ const dispatchOnBeforeCall = async (
   if (!identity) return;
 
   const getExecutor = await loadGetExecutor();
-  const executor = getExecutor(identity.identifier);
+  const executor = await getExecutor(identity.identifier);
   if (!executor?.onBeforeCall) return;
 
   await executor.onBeforeCall({ ...identity, topicId });
@@ -224,7 +222,7 @@ const dispatchOnAfterCall = async (
   if (!identity) return;
 
   const getExecutor = await loadGetExecutor();
-  const executor = getExecutor(identity.identifier);
+  const executor = await getExecutor(identity.identifier);
   if (!executor?.onAfterCall) return;
 
   await executor.onAfterCall({

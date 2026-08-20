@@ -42,13 +42,15 @@ export const highlightTextStyles = createStaticStyles(({ css, cssVar }) => {
   };
 });
 
+// Keep the loading cue compositor-only. background-position on clipped text is
+// not compositable and otherwise repaints the chat viewport on every frame.
 const shine = keyframes`
-  0% {
-    background-position: 100%;
+  0%, 100% {
+    opacity: 0.5;
   }
 
-  100% {
-    background-position: -100%;
+  50% {
+    opacity: 1;
   }
 `;
 
@@ -66,8 +68,15 @@ export const shinyTextStyles = createStaticStyles(({ css, cssVar }) => ({
       color-mix(in srgb, ${cssVar.colorTextBase} 0%, transparent) 60%
     );
     background-clip: text;
+    background-position: 50%;
     background-size: 200% 100%;
 
-    animation: ${shine} 1.5s linear infinite;
+    will-change: opacity;
+    animation: ${shine} 1.5s ease-in-out infinite;
+
+    @media (prefers-reduced-motion: reduce) {
+      opacity: 1;
+      animation: none;
+    }
   `,
 }));
